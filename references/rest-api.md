@@ -331,37 +331,21 @@ type ListOrdersRequest struct {
 // === Response DTOs ===
 
 type OrderResponse struct {
-    ID        string              `json:"id"`
-    Status    string              `json:"status"`
-    Total     int64               `json:"total"`
-    Items     []OrderItemResponse `json:"items"`
-    CreatedAt time.Time           `json:"created_at"`
-}
-
-type OrderItemResponse struct {
-    ProductID   string `json:"product_id"`
-    ProductName string `json:"product_name"`
-    Quantity    int    `json:"quantity"`
-    Price       int64  `json:"price"`
+    ID        string    `json:"id"`
+    Status    string    `json:"status"`
+    Total     int64     `json:"total"`
+    Currency  string    `json:"currency"`
+    CreatedAt time.Time `json:"created_at"`
 }
 
 // === Mapper functions ===
 
 func ToOrderResponse(order *entity.Order) *OrderResponse {
-    items := make([]OrderItemResponse, len(order.Items))
-    for i, item := range order.Items {
-        items[i] = OrderItemResponse{
-            ProductID:   item.ProductID,
-            ProductName: item.ProductName,
-            Quantity:    item.Quantity,
-            Price:       item.Price,
-        }
-    }
     return &OrderResponse{
         ID:        order.ID.String(),
         Status:    order.Status.String(),
         Total:     order.TotalAmount.Amount,
-        Items:     items,
+        Currency:  order.TotalAmount.Currency,
         CreatedAt: order.CreatedAt,
     }
 }
@@ -694,7 +678,6 @@ func (r *Router) setupRoutes() {
         protected.GET("/orders/:id", r.orderHandler.GetByID)
         protected.PATCH("/orders/:id", r.orderHandler.Update)
         protected.DELETE("/orders/:id", r.orderHandler.Delete)
-        protected.POST("/orders/:id/cancel", r.orderHandler.Cancel)
 
         // Users
         protected.GET("/users/me", r.userHandler.GetProfile)

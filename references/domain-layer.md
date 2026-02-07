@@ -62,7 +62,7 @@ Entity is NOT goroutine-safe. A single Entity instance must only be operated wit
 type Order struct {
     ID        uuid.UUID
     UserID    uuid.UUID
-    Status      valueobject.OrderStatus
+    Status    OrderStatus
     TotalAmount valueobject.Money
     Version   int          // Optimistic lock
     CreatedAt time.Time
@@ -77,9 +77,9 @@ func (o *Order) ClearEvents()                 { o.events = nil }
 
 // State transition whitelist
 var validTransitions = map[OrderStatus][]OrderStatus{
-    StatusPending:   {StatusConfirmed, StatusCancelled},
-    StatusConfirmed: {StatusPaid, StatusCancelled},
-    StatusPaid:      {StatusShipped, StatusRefunding},
+    OrderStatusPending:   {OrderStatusConfirmed, OrderStatusCancelled},
+    OrderStatusConfirmed: {OrderStatusPaid, OrderStatusCancelled},
+    OrderStatusPaid:      {OrderStatusShipped, OrderStatusCancelled},
 }
 
 func (o *Order) canTransitionTo(target OrderStatus) error {
@@ -149,8 +149,8 @@ go install github.com/dmarkham/enumer@latest
 ### Enum Definition
 
 ```go
-// internal/domain/valueobject/order_status.go
-package valueobject
+// internal/domain/entity/order_status.go
+package entity
 
 //go:generate enumer -type=OrderStatus -trimprefix=OrderStatus -json -sql -transform=snake
 type OrderStatus int32
@@ -243,7 +243,7 @@ type OrderRepository struct {
 func (r *OrderRepository) Create(ctx context.Context, order *entity.Order) error {
     q := sqlcgen.New(database.GetDBTX(ctx, r.pool))  // Dynamically uses TX or pool
     row, err := q.CreateOrder(ctx, sqlcgen.CreateOrderParams{
-        UserID: order.UserID, Status: string(order.Status),
+        UserID: order.UserID, Status: order.Status.String(),
         Amount: order.TotalAmount.Amount, Currency: order.TotalAmount.Currency,
     })
     if err != nil { return err }
@@ -262,13 +262,13 @@ func (r *OrderRepository) GetByID(ctx context.Context, id uuid.UUID) (*entity.Or
         }
         return nil, err
     }
-    return toDomainOrder(row), nil
+    return toDomainOrder(row)
 }
 
 func (r *OrderRepository) Update(ctx context.Context, order *entity.Order) error {
     q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
     result, err := q.UpdateOrderStatus(ctx, sqlcgen.UpdateOrderStatusParams{
-        ID: order.ID, Status: string(order.Status), Version: int32(order.Version),
+        ID: order.ID, Status: order.Status.String(), Version: int32(order.Version),
     })
     if err != nil { return err }
     if result.RowsAffected() == 0 {
@@ -279,13 +279,14 @@ func (r *OrderRepository) Update(ctx context.Context, order *entity.Order) error
 }
 
 // sqlcgen struct → Domain Entity (thin one-way mapping)
-func toDomainOrder(row *sqlcgen.Order) *entity.Order {
+func toDomainOrder(row *sqlcgen.Order) (*entity.Order, error) {
+    status, err := entity.OrderStatusString(row.Status)
+    if err != nil { return nil, fmt.Errorf("parse order status: %w", err) }
     return &entity.Order{
-        ID: row.ID, UserID: row.UserID,
-        Status:      entity.OrderStatus(row.Status),
+        ID: row.ID, UserID: row.UserID, Status: status,
         TotalAmount: valueobject.Money{Amount: row.Amount, Currency: row.Currency},
         Version: int(row.Version), CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
-    }
+    }, nil
 }
 ```
 

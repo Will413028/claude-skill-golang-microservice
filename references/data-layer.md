@@ -407,11 +407,14 @@ func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
         return err
     }
     o.ID = row.ID
+    o.Version = int(sqlutil.Int4Value(row.Version))
+    o.CreatedAt = sqlutil.TimestamptzValue(row.CreatedAt)
+    o.UpdatedAt = sqlutil.TimestamptzValue(row.UpdatedAt)
     return nil
 }
 
 func (r *orderRepository) toEntity(row sqlcgen.Order) (*entity.Order, error) {
-    status, err := valueobject.OrderStatusString(sqlutil.TextValue(row.Status))
+    status, err := entity.OrderStatusString(sqlutil.TextValue(row.Status))
     if err != nil {
         return nil, fmt.Errorf("parse order status %q: %w", sqlutil.TextValue(row.Status), err)
     }
