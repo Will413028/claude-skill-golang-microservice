@@ -118,6 +118,7 @@ package job
 
 type Controller struct {
     statsContentHourlyJob jobuc.StatsContentHourlyJob
+    logger                *zap.Logger
 }
 
 // API Handler - accepts custom time range for backfill/debug
@@ -152,11 +153,11 @@ func (c *Controller) StatsContentHourlyCron() {
         StatsTimeEnd:   now,
     }
 
-    zap.L().Info("job start", zap.String("job", "StatsContentHourly"), ctxutil.TraceID.ToLog(ctx))
-    defer zap.L().Info("job end", zap.String("job", "StatsContentHourly"), ctxutil.TraceID.ToLog(ctx))
+    c.logger.Info("job start", zap.String("job", "StatsContentHourly"), ctxutil.TraceID.ToLog(ctx))
+    defer c.logger.Info("job end", zap.String("job", "StatsContentHourly"), ctxutil.TraceID.ToLog(ctx))
 
     if err := c.statsContentHourlyJob.Handle(ctx, param); err != nil {
-        zap.L().Error("job failed", zap.String("job", "StatsContentHourly"), zap.Error(err))
+        c.logger.Error("job failed", zap.String("job", "StatsContentHourly"), zap.Error(err))
     }
 }
 ```
@@ -304,11 +305,11 @@ func (c *Controller) StatsContentHourlyCron() {
     // Try to acquire lock (TTL = max job duration + buffer)
     acquired, err := c.lock.TryLock(ctx, lockKey, 30*time.Minute)
     if err != nil {
-        zap.L().Error("failed to acquire lock", zap.String("job", "StatsContentHourly"), zap.Error(err))
+        c.logger.Error("failed to acquire lock", zap.String("job", "StatsContentHourly"), zap.Error(err))
         return
     }
     if !acquired {
-        zap.L().Info("job skipped - another instance is running", zap.String("job", "StatsContentHourly"))
+        c.logger.Info("job skipped - another instance is running", zap.String("job", "StatsContentHourly"))
         return
     }
     // Note: Don't unlock manually - let TTL expire to prevent re-execution within window
@@ -318,12 +319,12 @@ func (c *Controller) StatsContentHourlyCron() {
         StatsTimeEnd:   now,
     }
 
-    zap.L().Info("job start", zap.String("job", "StatsContentHourly"), ctxutil.TraceID.ToLog(ctx))
+    c.logger.Info("job start", zap.String("job", "StatsContentHourly"), ctxutil.TraceID.ToLog(ctx))
     if err := c.statsContentHourlyJob.Handle(ctx, param); err != nil {
-        zap.L().Error("job failed", zap.String("job", "StatsContentHourly"), zap.Error(err))
+        c.logger.Error("job failed", zap.String("job", "StatsContentHourly"), zap.Error(err))
         return
     }
-    zap.L().Info("job end", zap.String("job", "StatsContentHourly"), ctxutil.TraceID.ToLog(ctx))
+    c.logger.Info("job end", zap.String("job", "StatsContentHourly"), ctxutil.TraceID.ToLog(ctx))
 }
 ```
 
@@ -392,6 +393,7 @@ package job
 
 type JobExecutor struct {
     execRepo repository.JobExecutionRepository
+    logger   *zap.Logger
 }
 
 // WithTracking wraps job execution with audit logging
@@ -421,7 +423,7 @@ func (e *JobExecutor) WithTracking(
     }
 
     if err := e.execRepo.Create(ctx, exec); err != nil {
-        zap.L().Error("failed to create job execution record", zap.Error(err))
+        e.logger.Error("failed to create job execution record", zap.Error(err))
         // Continue execution even if logging fails
     }
 
@@ -429,8 +431,9 @@ func (e *JobExecutor) WithTracking(
     jobErr := fn(ctx)
 
     // Update execution record
-    exec.FinishedAt = time.Now()
-    exec.DurationMs = int(exec.FinishedAt.Sub(exec.StartedAt).Milliseconds())
+    now := time.Now()
+    exec.FinishedAt = &now
+    exec.DurationMs = int(now.Sub(exec.StartedAt).Milliseconds())
     if jobErr != nil {
         exec.Status = "failed"
         exec.ErrorMessage = jobErr.Error()
@@ -439,7 +442,7 @@ func (e *JobExecutor) WithTracking(
     }
 
     if err := e.execRepo.Update(ctx, exec); err != nil {
-        zap.L().Error("failed to update job execution record", zap.Error(err))
+        e.logger.Error("failed to update job execution record", zap.Error(err))
     }
 
     return jobErr
@@ -478,8 +481,8 @@ func (c *Controller) StatsContentHourlyCron() {
 Consistent log fields enable log-based alerting:
 
 ```go
-// Standard job log fields
-zap.L().Info("job event",
+// Standard job log fields (logger is injected *zap.Logger)
+logger.Info("job event",
     zap.String("event", "job_start"),    // job_start, job_end, job_failed
     zap.String("job", "StatsContentHourly"),
     zap.String("trigger", "cron"),        // cron, api

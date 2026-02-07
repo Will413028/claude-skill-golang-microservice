@@ -8,9 +8,11 @@
 - [Tracing Protocol](#tracing-protocol)
 - [MQ Trace Context Propagation `[Async]`](#mq-trace-context-propagation-async)
 - [API Pagination](#api-pagination)
+- [Batch API](#batch-api)
 - [DTO Mapping](#dto-mapping)
 - [Context Deadline / Timeout Budget](#context-deadline--timeout-budget)
 - [Authentication / Authorization](#authentication--authorization)
+- [Proto Versioning Strategy](#proto-versioning-strategy)
 
 ## Error Handling Architecture
 
@@ -211,14 +213,16 @@ UseCase depends on Output Port interfaces, never on concrete implementations. Ad
 Order matters — outermost executes first on request, last on response:
 
 ```go
+// auth := interceptor.NewAuthInterceptor(jwtValidator, publicMethods)  // injected by Fx
+// rl   := interceptor.NewRateLimiter(globalRPS, globalBurst)           // injected by Fx
 grpc.ChainUnaryInterceptor(
     otelgrpc.UnaryServerInterceptor(),          // 1. OTel tracing (outermost)
     interceptor.ServerCorrelationInterceptor(),  // 2. correlation_id / request_id
     interceptor.LoggingInterceptor(logger),      // 3. Request logging (logs unauthenticated attempts too)
     interceptor.RecoveryInterceptor(logger),     // 4. Panic recovery
     interceptor.MetricsInterceptor(metrics),     // 5. Prometheus metrics
-    interceptor.RateLimitInterceptor(limiter),   // 6. Rate limiting (before auth to reject floods early)
-    interceptor.AuthInterceptor(jwtValidator),   // 7. Authentication (after rate limit)
+    interceptor.RateLimitInterceptor(rl),        // 6. Rate limiting (before auth to reject floods early)
+    auth.Unary(),                                // 7. Authentication (after rate limit)
     interceptor.ErrorMappingInterceptor(),       // 8. Error mapping (innermost)
 )
 ```
@@ -454,6 +458,68 @@ type OrderRepository interface {
     ListByUserID(ctx context.Context, userID uuid.UUID, cursor *pagination.Cursor, pageSize int) ([]*entity.Order, error)
 }
 ```
+
+## Batch API
+
+### Proto Definition
+
+```protobuf
+// Batch create with per-item result (supports partial failure)
+message BatchCreateOrdersRequest {
+  repeated CreateOrderRequest items = 1;  // Max 100 items, enforced by server
+}
+
+message BatchCreateOrdersResponse {
+  repeated BatchItemResult results = 1;
+}
+
+message BatchItemResult {
+  int32 index = 1;          // Original request index (0-based)
+  bool success = 2;
+  Order order = 3;          // Populated on success
+  string error_code = 4;    // Populated on failure
+  string error_message = 5;
+}
+```
+
+### Implementation Pattern
+
+```go
+func (u *OrderUseCase) BatchCreate(ctx context.Context, req *pb.BatchCreateOrdersRequest) (*pb.BatchCreateOrdersResponse, error) {
+    if len(req.Items) > 100 {
+        return nil, status.Error(codes.InvalidArgument, "batch size exceeds 100")
+    }
+
+    results := make([]*pb.BatchItemResult, len(req.Items))
+    for i, item := range req.Items {
+        order, err := u.createSingleOrder(ctx, item)
+        if err != nil {
+            results[i] = &pb.BatchItemResult{
+                Index:        int32(i),
+                Success:      false,
+                ErrorCode:    toErrorCode(err),
+                ErrorMessage: err.Error(),
+            }
+            continue
+        }
+        results[i] = &pb.BatchItemResult{
+            Index:   int32(i),
+            Success: true,
+            Order:   toProtoOrder(order),
+        }
+    }
+    return &pb.BatchCreateOrdersResponse{Results: results}, nil
+}
+```
+
+### Transaction Boundary
+
+| Strategy | When to Use | Pattern |
+|----------|-------------|---------|
+| **Per-item TX** | Independent items, partial success acceptable | Each item in its own TX (above example) |
+| **All-or-nothing TX** | Tightly coupled items, must all succeed or fail | Wrap entire batch in `TxManager.Do()`, return gRPC error on any failure |
+
+**Per-item TX** is the default recommendation — it provides better UX (partial success) and avoids long-running transactions.
 
 ## DTO Mapping
 
@@ -765,7 +831,7 @@ func TraceIDInterceptor() grpc.UnaryServerInterceptor {
 
 // 在任何地方 log
 func (u *OrderUseCase) CreateOrder(ctx context.Context, req CreateOrderRequest) error {
-    zap.L().Info("creating order",
+    u.logger.Info("creating order",
         ctxutil.TraceID.ToLog(ctx),  // 自動輸出 "traceID": "xxx"
         zap.Int64("buyerID", req.BuyerID),
     )
@@ -853,7 +919,7 @@ func (u *PaymentUseCase) ProcessPayment(ctx context.Context, req PaymentRequest)
     }
 
     // Audit log
-    zap.L().Info("processing payment",
+    u.logger.Info("processing payment",
         ctxutil.TraceID.ToLog(ctx),
         zap.String("clientIP", info.ClientIP),
         zap.Int64("amount", req.Amount),
@@ -884,15 +950,170 @@ func AuthPropagationInterceptor() grpc.UnaryClientInterceptor {
 }
 ```
 
+### RBAC Permission Interceptor
+
+Coarse-grained authorization at interceptor level. Define method → required roles mapping:
+
+```go
+// pkg/middleware/grpc/interceptor/permission.go
+
+type PermissionInterceptor struct {
+    // method → allowed roles (empty = any authenticated user)
+    methodRoles map[string][]string
+}
+
+func NewPermissionInterceptor(rules map[string][]string) *PermissionInterceptor {
+    return &PermissionInterceptor{methodRoles: rules}
+}
+
+func (p *PermissionInterceptor) Unary() grpc.UnaryServerInterceptor {
+    return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo,
+        handler grpc.UnaryHandler) (interface{}, error) {
+
+        required, exists := p.methodRoles[info.FullMethod]
+        if !exists || len(required) == 0 {
+            return handler(ctx, req)  // No role restriction
+        }
+
+        userRoles := ctxutil.UserRolesFrom(ctx)
+        if !hasAnyRole(userRoles, required) {
+            return nil, status.Error(codes.PermissionDenied, "insufficient permissions")
+        }
+        return handler(ctx, req)
+    }
+}
+
+func hasAnyRole(userRoles, required []string) bool {
+    roleSet := make(map[string]bool, len(userRoles))
+    for _, r := range userRoles { roleSet[r] = true }
+    for _, r := range required {
+        if roleSet[r] { return true }
+    }
+    return false
+}
+```
+
+**Fx Wiring**:
+```go
+// di.go
+fx.Provide(func() *interceptor.PermissionInterceptor {
+    return interceptor.NewPermissionInterceptor(map[string][]string{
+        "/order.v1.OrderService/Refund":       {"admin", "cs_manager"},
+        "/order.v1.OrderService/ForceCancel":   {"admin"},
+        "/merchant.v1.MerchantService/Approve": {"admin", "reviewer"},
+    })
+})
+```
+
+**Fine-grained permission** (resource-level) belongs in UseCase, not interceptor:
+
+```go
+// UseCase: check resource ownership
+func (u *OrderUseCase) Cancel(ctx context.Context, orderID uuid.UUID) error {
+    order, err := u.repo.GetByID(ctx, orderID)
+    if err != nil { return err }
+
+    userID, _ := ctxutil.UserIDFrom(ctx)
+    roles := ctxutil.UserRolesFrom(ctx)
+
+    // Resource-level: owner or admin
+    if order.UserID != userID && !hasRole(roles, "admin") {
+        return domain.ErrPermissionDenied
+    }
+    return order.Cancel(time.Now())
+}
+```
+
+**Two-layer authorization model**:
+
+| Layer | Scope | Where | Example |
+|-------|-------|-------|---------|
+| Interceptor | Method-level (coarse) | `PermissionInterceptor` | "Only admin can call ForceCancel" |
+| UseCase | Resource-level (fine) | Business logic | "Only order owner or admin can cancel" |
+
 ### Architecture Placement
 
 | Component | Location | Layer |
 |-----------|----------|-------|
 | JWT validation logic | `pkg/auth/jwt/` | Shared |
 | Auth Interceptor | `pkg/middleware/grpc/interceptor/` | Shared |
+| Permission Interceptor | `pkg/middleware/grpc/interceptor/` | Shared |
 | User context helpers | `pkg/ctxutil/` | Shared |
 | Auth propagation (client) | `pkg/middleware/grpc/interceptor/` | Shared |
-| Role-based access control | UseCase or dedicated Interceptor | Application |
+| Resource-level authorization | UseCase | Application |
+
+## Proto Versioning Strategy
+
+### Package Naming Convention
+
+```protobuf
+// proto/order/v1/order.proto
+syntax = "proto3";
+package dailyfresh.order.v1;
+
+option go_package = "github.com/dailyfresh/go-proto/order/v1;orderv1";
+```
+
+Directory structure mirrors package:
+```
+proto/
+├── order/v1/order.proto
+├── order/v2/order.proto     // Major version bump
+├── merchant/v1/merchant.proto
+└── common/v1/common.proto   // Shared messages
+```
+
+### Backward-Compatible Evolution (Within v1)
+
+| Allowed | Forbidden |
+|---------|-----------|
+| Add new fields (new field number) | Remove existing fields |
+| Add new RPC methods | Change field numbers |
+| Add new enum values | Change field types |
+| Mark fields `deprecated = true` | Rename fields (wire format uses number, not name — rename is safe but confusing) |
+| Add new `oneof` members | Change `repeated` ↔ `optional` |
+
+```protobuf
+// ✅ Safe evolution: add new optional field
+message Order {
+  string id = 1;
+  string status = 2;
+  int64 amount = 3;
+  // Added in v1.2 — old clients ignore it, new clients use it
+  optional string cancel_reason = 4;
+
+  // Removed field — reserve to prevent accidental reuse
+  reserved 5;
+  reserved "legacy_field";
+}
+```
+
+### When to Bump Major Version (v1 → v2)
+
+Bump to v2 when changes are **structurally incompatible**:
+
+- Semantic change to existing field (same type but different meaning)
+- Complete redesign of request/response structure
+- Removal of an RPC method that clients depend on
+- Change in streaming direction (unary → server stream)
+
+**Migration strategy**: Run v1 and v2 services simultaneously. v2 service imports v1 repo for shared data access. Deprecate v1 after all clients migrate.
+
+### buf breaking Enforcement
+
+```yaml
+# buf.yaml
+breaking:
+  use:
+    - WIRE_JSON  # Detects wire-format and JSON breaking changes
+```
+
+```bash
+# CI: check backward compatibility against main branch
+buf breaking --against '.git#branch=main'
+```
+
+`buf breaking` automatically catches: field removal, type changes, field number changes, service/method removal.
 
 ---
 

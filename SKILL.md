@@ -82,8 +82,9 @@ Every new project follows these four stages. Determine the current stage to deci
    - gRPC + base Interceptor Chain (OTel → correlation → logging → recovery → metrics → auth → error mapping)
    - DomainError + ErrorCode + centralized Interceptor mapping
    - **Context Deadline / Timeout Budget** (deadline propagation, per-layer budget subtraction)
-   - **Authentication / Authorization** (JWT Interceptor, user context propagation, cross-service auth forwarding)
-   - API pagination (Offset / Cursor strategy selection)
+   - **Authentication / Authorization** (JWT Interceptor, RBAC Permission Interceptor, user context propagation, cross-service auth forwarding)
+   - API pagination (Offset / Cursor strategy selection) + Batch API (partial failure pattern)
+   - **Proto Versioning Strategy** (package naming, backward-compatible evolution, `buf breaking`)
    - DTO mapping (manual mapper functions, compile-time safe)
 
 4. **HTTP Gateway** → Read [references/http-gateway.md](references/http-gateway.md)
@@ -97,10 +98,13 @@ Every new project follows these four stages. Determine the current stage to deci
    - Response format: HTTP status + business code (`{"code": 0, "data": {...}}`)
    - Request DTO validation (Gin binding tags)
    - DomainError → HTTP status mapping
+   - Batch API (per-item result, partial failure)
 
 6. **Data layer** → Read [references/data-layer.md](references/data-layer.md)
    - Database-per-Service (logical isolation)
    - sqlc (SQL-first, type-safe) + Atlas (declarative migration)
+   - **Zero-Downtime Schema Migration** (expand-and-contract, backfill strategy, deployment ordering)
+   - **Keyset Pagination** (composite cursor, N+1 fetch pattern)
    - Config management (`os.Getenv` + struct + Fail-Fast Validation)
 
 7. **Cross-service transactions** → Read [references/async-patterns.md](references/async-patterns.md)
@@ -157,6 +161,12 @@ Every new project follows these four stages. Determine the current stage to deci
 
 7. **Saga timeout monitor** + enhanced idempotency (Redis SET NX)
 
+8. **CQRS Read Model Projection** → Read [references/async-patterns.md](references/async-patterns.md)
+   - Denormalized read table (zero JOIN list queries)
+   - Event Projector (MQ Consumer maintains read model)
+   - QueryService pattern (bypass Domain Entity for reads)
+   - Read-your-writes consistency (Redis flag fallback)
+
 ### Hardening — Must Do
 
 1. **Graceful Shutdown** → Read [references/infrastructure.md](references/infrastructure.md)
@@ -197,10 +207,14 @@ Every new project follows these four stages. Determine the current stage to deci
 | Context Deadline / Timeout Budget | ✅ Must | — | — | — |
 | Authentication / Authorization | ✅ Must | — | — | — |
 | gRPC Interceptor Chain | ✅ Must (base) | Add MQ Trace propagation | — | — |
-| API Pagination | ✅ Must | — | — | — |
+| API Pagination + Keyset Pagination | ✅ Must | — | — | — |
+| Batch API (gRPC + REST) | ✅ Must | — | — | — |
+| Proto Versioning Strategy | ✅ Must | — | — | — |
+| RBAC Permission Interceptor | ✅ Must | — | — | — |
 | Config management | ✅ Must | — | — | — |
 | Structured logging | ✅ Must | — | — | — |
 | Database (sqlc + Atlas) | ✅ Must | — | — | — |
+| Zero-Downtime Schema Migration | ✅ Must | — | — | — |
 | Sync Saga + step persistence | ✅ Must | Replace with Async Saga | — | — |
 | Async Saga + Outbox + TxManager | — | ✅ Must | — | — |
 | MQ Consumer patterns | — | ✅ Must | — | — |
@@ -210,6 +224,7 @@ Every new project follows these four stages. Determine the current stage to deci
 | Distributed Lock (Redlock + WatchDog) | — | ✅ Must | — | — |
 | Idempotency | ✅ Must (DB) | Add Redis SET NX | — | — |
 | Saga timeout monitor | — | ✅ Must | — | — |
+| CQRS Read Model Projection | — | Optional (high-read + cross-service) | — | — |
 | gRPC Health Check Service | — | — | ✅ Must | — |
 | Dead Letter Queue | — | — | ✅ Must | — |
 | Graceful Shutdown | Optional | — | ✅ Must | — |

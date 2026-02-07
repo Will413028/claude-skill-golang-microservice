@@ -3,7 +3,7 @@
 ## Table of Contents
 
 - [Cache + singleflight `[Async]`](#cache--singleflight-async)
-- [Cache Invalidation Strategy `[Async]`](#cache-invalidation-strategy-async)
+  - [Cache Invalidation Strategy `[Async]`](#cache-invalidation-strategy-async)
 - [Circuit Breaker + singleflight gRPC Client `[Async]`](#circuit-breaker--singleflight-grpc-client-async)
 - [Dispatcher Pattern `[Async]`](#dispatcher-pattern-async)
 - [Panic-Safe errgroup `[Async]`](#panic-safe-errgroup-async)
@@ -342,6 +342,8 @@ Standard `errgroup.Group` does not recover panics — a panic in one goroutine c
 package gogroup
 
 import (
+    "fmt"
+
     "go.uber.org/zap"
     "golang.org/x/sync/errgroup"
 )
@@ -356,11 +358,12 @@ func WithPanicCallback(callback func(r any)) Option {
 
 type group struct {
     *errgroup.Group
+    logger        *zap.Logger
     panicCallback func(r any)
 }
 
-func New(opts ...Option) *group {
-    g := &group{Group: new(errgroup.Group)}
+func New(logger *zap.Logger, opts ...Option) *group {
+    g := &group{Group: new(errgroup.Group), logger: logger}
     for _, opt := range opts {
         opt(g)
     }
@@ -371,7 +374,7 @@ func (g *group) Go(f func() error) {
     g.Group.Go(func() (err error) {
         defer func() {
             if r := recover(); r != nil {
-                zap.L().Error("goroutine panic",
+                g.logger.Error("goroutine panic",
                     zap.Any("recover", r),
                     zap.Stack("stack"),
                 )
@@ -391,7 +394,7 @@ func (g *group) Go(f func() error) {
 
 ```go
 func (uc *UseCase) ProcessConcurrently(ctx context.Context, items []Item) error {
-    g := gogroup.New(
+    g := gogroup.New(uc.logger,
         gogroup.WithPanicCallback(func(r any) {
             // Send to Sentry, PagerDuty, etc.
             sentry.CaptureException(fmt.Errorf("panic: %v", r))
@@ -532,7 +535,10 @@ func (m *Mutex) UntilLock() error {
 // Unlock releases the lock and stops WatchDog
 func (m *Mutex) Unlock() error {
     defer m.cancel()
-    _, err := m.mx.UnlockContext(m.ctx)
+    // Use independent context — m.ctx may be cancelled by watchDog if extension failed
+    unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer unlockCancel()
+    _, err := m.mx.UnlockContext(unlockCtx)
     return err
 }
 

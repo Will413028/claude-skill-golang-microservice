@@ -159,18 +159,15 @@ func NewCheckoutUseCase(
 }
 
 func (u *checkoutUseCase) Execute(ctx context.Context, req *request.Checkout) (*response.CheckoutResult, error) {
-    // 1. 驗證地址
     addr, err := u.addressSvc.Get(ctx, req.AddressID)
     if err != nil { return nil, err }
 
-    // 2. 扣除積分（如有使用）
     if req.UsePoints > 0 {
         if err := u.pointsSvc.Deduct(ctx, req.AccountID, req.UsePoints); err != nil {
             return nil, err
         }
     }
 
-    // 3. 建立訂單（跨服務呼叫）
     order, err := u.orderClient.Create(ctx, &output.CreateOrderRequest{...})
     if err != nil { return nil, err }
 

@@ -142,6 +142,8 @@ func registerLifecycle(
 
 ### MQ Consumer Graceful Shutdown
 
+> For message processing patterns (ack/nack, event versioning, trace propagation), see [async-patterns.md → MQ Consumer Patterns](async-patterns.md#mq-consumer-patterns-async).
+
 ```go
 // internal/adapter/inbound/mq/consumer.go
 type Consumer struct {
@@ -206,6 +208,8 @@ func (c *Consumer) handleMessage(queue string, msg amqp.Delivery, handler Messag
 ```
 
 ### Outbox Poller Graceful Shutdown
+
+> For two-phase pick/publish pattern and adaptive polling, see [async-patterns.md → Two-Phase Outbox Poller](async-patterns.md#two-phase-outbox-poller-async).
 
 ```go
 // internal/infrastructure/outbox/poller.go

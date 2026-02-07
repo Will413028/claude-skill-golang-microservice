@@ -20,6 +20,7 @@ Covers MQ consumer patterns, Saga orchestration, and Outbox pattern for reliable
 - [TxManager `[Async]`](#txmanager-async)
 - [Saga Timeout Monitor `[Async]`](#saga-timeout-monitor-async)
 - [Repository Interface Segregation](#repository-interface-segregation)
+- [CQRS Read Model Projection `[Async]`](#cqrs-read-model-projection-async)
 
 ## MQ Consumer Patterns `[Async]`
 
@@ -768,3 +769,151 @@ type SagaRepository interface {
     GetCompletedSteps(ctx context.Context, sagaID uuid.UUID) ([]string, error)
 }
 ```
+
+## CQRS Read Model Projection `[Async]`
+
+### When to Introduce
+
+| Signal | Threshold |
+|--------|-----------|
+| List queries need JOIN 3+ tables or cross-service assembly | ✅ Introduce |
+| Read/write ratio > 10:1 | ✅ Introduce |
+| Read and write performance requirements diverge significantly | ✅ Introduce |
+| Read model structure ≈ write model (single-table queries suffice) | ❌ Skip |
+
+**Prerequisite**: Domain Event + MQ Consumer infrastructure must already exist (Async stage).
+
+### Architecture
+
+```
+Command path:  gRPC → UseCase → Entity → Repository → Main DB (normalized)
+                                    ↓
+                              Domain Event (via Outbox)
+                                    ↓
+                              MQ Consumer (Projector)
+                                    ↓
+Query path:    gRPC → QueryService → Read DB (denormalized, zero JOIN)
+```
+
+### Denormalized Read Table
+
+```sql
+-- Read model: flatten all data needed for list API into one table
+CREATE TABLE order_list_view (
+    order_id       UUID PRIMARY KEY,
+    buyer_id       UUID NOT NULL,
+    buyer_name     TEXT NOT NULL,
+    merchant_id    UUID NOT NULL,
+    merchant_name  TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    amount         BIGINT NOT NULL,
+    item_count     INT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL,
+    updated_at     TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX idx_order_list_view_buyer ON order_list_view (buyer_id, created_at DESC, order_id DESC);
+```
+
+### Event Projector (MQ Consumer)
+
+Projector listens to Domain Events and maintains the read model:
+
+```go
+// internal/adapter/inbound/mq/order_projector.go
+type OrderProjector struct {
+    viewRepo  OrderViewRepository
+    userClient userv1.UserServiceClient  // Cross-service query for denormalization
+    logger    *zap.Logger
+}
+
+func (p *OrderProjector) Handle(ctx context.Context, event DomainEvent) error {
+    switch e := event.(type) {
+    case *OrderCreatedEvent:
+        buyer, err := p.userClient.GetUser(ctx, &userv1.GetUserRequest{Id: e.BuyerID.String()})
+        if err != nil {
+            return fmt.Errorf("fetch buyer for projection: %w", err)  // Transient → retry
+        }
+        return p.viewRepo.Upsert(ctx, &OrderListView{
+            OrderID:      e.OrderID,
+            BuyerID:      e.BuyerID,
+            BuyerName:    buyer.Name,
+            MerchantID:   e.MerchantID,
+            MerchantName: e.MerchantName,
+            Status:       e.Status.String(),
+            Amount:       e.Amount,
+            ItemCount:    e.ItemCount,
+            CreatedAt:    e.CreatedAt,
+            UpdatedAt:    e.CreatedAt,
+        })
+
+    case *OrderStatusChangedEvent:
+        return p.viewRepo.UpdateStatus(ctx, e.OrderID, e.NewStatus.String(), e.OccurredAt)
+
+    case *UserNameChangedEvent:
+        // Propagate cross-service changes to denormalized fields
+        return p.viewRepo.UpdateBuyerName(ctx, e.UserID, e.NewName)
+    }
+    return nil
+}
+```
+
+### Query Service
+
+Query Service bypasses Domain Entity — reads directly from the denormalized view:
+
+```go
+// internal/application/query/order_query_service.go
+type OrderQueryService struct {
+    viewRepo OrderViewRepository
+}
+
+func (q *OrderQueryService) ListByBuyer(ctx context.Context, buyerID uuid.UUID, cursor *pagination.Cursor, pageSize int) ([]*OrderListView, error) {
+    return q.viewRepo.ListByBuyer(ctx, buyerID, cursor, pageSize)
+}
+```
+
+**gRPC handler** routes commands to UseCase, queries to QueryService:
+
+```go
+func (s *OrderServer) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (*pb.CreateOrderResponse, error) {
+    return s.useCase.Create(ctx, req)  // Command → UseCase → Entity
+}
+
+func (s *OrderServer) ListOrders(ctx context.Context, req *pb.ListOrdersRequest) (*pb.ListOrdersResponse, error) {
+    return s.queryService.ListByBuyer(ctx, req)  // Query → QueryService → View
+}
+```
+
+### Read-Your-Writes Consistency
+
+Projection has eventual consistency delay. When a user writes and immediately reads, they may not see their own update. Two mitigation strategies:
+
+| Strategy | How | Trade-off |
+|----------|-----|-----------|
+| **Fallback to main DB** | After write, set a short-lived flag (Redis TTL 3s). Query checks flag — if set, read from main DB instead of view | Simple; adds slight main DB load for recently-written users |
+| **Return write result** | `CreateOrder` response includes the created order data. Client uses this for immediate display, then switches to list API on next load | Zero extra DB cost; client must handle the logic |
+
+**Fallback pattern**:
+
+```go
+func (q *OrderQueryService) ListByBuyer(ctx context.Context, buyerID uuid.UUID, cursor *pagination.Cursor, pageSize int) ([]*OrderListView, error) {
+    // Check if user recently wrote (projection may lag)
+    key := fmt.Sprintf("cqrs:written:%s", buyerID)
+    if q.redis.Exists(ctx, key).Val() > 0 {
+        // Fallback to main DB query (slower but consistent)
+        return q.mainRepo.ListByBuyer(ctx, buyerID, cursor, pageSize)
+    }
+    return q.viewRepo.ListByBuyer(ctx, buyerID, cursor, pageSize)
+}
+```
+
+### Architecture Placement
+
+| Component | Location | Layer |
+|-----------|----------|-------|
+| Read table schema | `db/schema/` | Infrastructure |
+| OrderViewRepository | `internal/repository/` | Infrastructure |
+| Event Projector | `internal/adapter/inbound/mq/` | Adapter |
+| OrderQueryService | `internal/application/query/` | Application |
+| gRPC handler routing | `internal/adapter/inbound/grpc/` | Adapter |

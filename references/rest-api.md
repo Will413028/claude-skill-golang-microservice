@@ -16,6 +16,7 @@ For **API Gateway** patterns (REST → gRPC translation, no UseCase), see [http-
 - [Error Handling: DomainError to HTTP Status](#error-handling-domainerror-to-http-status)
 - [Middleware Chain](#middleware-chain)
 - [Pagination](#pagination)
+- [Batch API](#batch-api)
 - [File Upload](#file-upload)
 - [API Versioning](#api-versioning)
 
@@ -306,7 +307,11 @@ Use Gin's binding tags for validation:
 // internal/adapter/inbound/rest/handler/order_dto.go
 package handler
 
-import "time"
+import (
+    "time"
+
+    "myapp/internal/domain/entity"
+)
 
 // === Request DTOs ===
 
@@ -762,6 +767,73 @@ func DecodeCursor(cursor string) (string, error) {
     return string(data), nil
 }
 ```
+
+## Batch API
+
+### Request / Response Format
+
+```go
+// POST /api/v1/orders/batch
+// Request
+type BatchCreateOrdersRequest struct {
+    Items []CreateOrderRequest `json:"items" binding:"required,min=1,max=100"`
+}
+
+// Response — always HTTP 200, per-item status in body
+type BatchResponse struct {
+    Code    int               `json:"code"`
+    Results []BatchItemResult `json:"results"`
+    Summary BatchSummary      `json:"summary"`
+}
+
+type BatchItemResult struct {
+    Index   int    `json:"index"`
+    Success bool   `json:"success"`
+    Data    any    `json:"data,omitempty"`
+    Error   string `json:"error,omitempty"`
+}
+
+type BatchSummary struct {
+    Total     int `json:"total"`
+    Succeeded int `json:"succeeded"`
+    Failed    int `json:"failed"`
+}
+```
+
+### Handler Pattern
+
+```go
+func (h *OrderHandler) BatchCreate(c *gin.Context) {
+    var req BatchCreateOrdersRequest
+    if err := c.ShouldBindJSON(&req); err != nil {
+        response.BadRequest(c, 1001, err.Error())
+        return
+    }
+
+    result, err := h.useCase.BatchCreate(c.Request.Context(), req.Items)
+    if err != nil {
+        h.handleError(c, err)
+        return
+    }
+
+    c.JSON(http.StatusOK, BatchResponse{
+        Code:    0,
+        Results: result.Items,
+        Summary: BatchSummary{
+            Total:     len(req.Items),
+            Succeeded: result.SuccessCount,
+            Failed:    result.FailCount,
+        },
+    })
+}
+```
+
+### Design Rules
+
+- **Max batch size**: Enforce server-side limit (e.g., 100). Return `400 Bad Request` if exceeded.
+- **HTTP status**: Always `200 OK`. Use per-item `success` field for partial failures. Avoid `207 Multi-Status` (poor client support).
+- **Idempotency**: Each item should carry its own idempotency key if the operation is non-idempotent.
+- **Timeout**: Set request timeout proportional to batch size. Consider `context.WithTimeout` per item.
 
 ## File Upload
 

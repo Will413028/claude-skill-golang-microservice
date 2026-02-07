@@ -7,6 +7,7 @@
   - [Migration Safety & Rollback Strategy](#migration-safety--rollback-strategy)
   - [Nullable Type Helpers (pkg/sqlutil)](#nullable-type-helpers-pkgsqlutil)
   - [Repository Implementation Pattern](#repository-implementation-pattern)
+- [Keyset Pagination](#keyset-pagination)
 - [Connection Pool Tuning](#connection-pool-tuning)
 - [Configuration Management](#configuration-management)
 - [Logging](#logging)
@@ -217,19 +218,81 @@ atlas migrate apply --dir "file://migrations" --url "$DATABASE_URL"
 
 ### Migration Safety & Rollback Strategy
 
-Atlas generates forward-only migrations. For safe production rollbacks:
+Atlas generates forward-only migrations. All schema changes must be **backward-compatible** because rolling updates run old and new code simultaneously.
 
-**Backward-compatible changes only** — deploy schema before code:
+#### Safe vs Unsafe Operations
 
 | Change Type | Safe Strategy | Unsafe |
 |-------------|---------------|--------|
 | Add column | Add as nullable or with default | Add as NOT NULL without default |
 | Remove column | Deploy code first (stop reading), then drop column in next release | Drop column while code still reads it |
-| Rename column | Add new column → copy data → deploy code → drop old column | `ALTER COLUMN RENAME` |
+| Rename column | Expand-and-contract (see below) | `ALTER COLUMN RENAME` |
 | Add index | `CREATE INDEX CONCURRENTLY` | `CREATE INDEX` (locks table) |
-| Change type | Add new column → migrate → deploy → drop old | `ALTER COLUMN TYPE` |
+| Change type | Expand-and-contract (see below) | `ALTER COLUMN TYPE` |
 
-**CI check for destructive changes**:
+#### Expand-and-Contract Pattern
+
+For any **breaking schema change** (rename, type change, column split), use three sequential deploys:
+
+```
+Example: Split orders.name → first_name + last_name
+
+Deploy 1 — Expand (add new columns)
+├── Migration: ALTER TABLE orders ADD first_name TEXT, ADD last_name TEXT;
+├── Code: Write to BOTH name AND first_name/last_name
+├── Read from: name (old column)
+└── Result: old code ignores new columns, new code writes both ✅
+
+Deploy 2 — Migrate (backfill + switch reads)
+├── Backfill: UPDATE orders SET first_name=split(name,1), last_name=split(name,2)
+│            WHERE first_name IS NULL;  -- idempotent, batched
+├── Code: Read from first_name/last_name, still write both
+└── Result: all reads use new columns ✅
+
+Deploy 3 — Contract (remove old column)
+├── Code: Remove all name references
+├── Migration: ALTER TABLE orders DROP COLUMN name;
+└── Result: clean schema ✅
+```
+
+#### Data Backfill Strategy
+
+```go
+// Backfill as a scheduled job (see scheduled-jobs.md)
+// Batch processing to avoid long-running transactions
+func (j *BackfillNameJob) Execute(ctx context.Context) error {
+    const batchSize = 1000
+    for {
+        affected, err := j.repo.BackfillNames(ctx, batchSize)
+        if err != nil {
+            return err
+        }
+        if affected == 0 {
+            return nil // Done
+        }
+        j.logger.Info("backfill progress", zap.Int64("affected", affected))
+    }
+}
+```
+
+```sql
+-- name: BackfillNames :execrows
+UPDATE orders
+SET first_name = split_part(name, ' ', 1),
+    last_name  = split_part(name, ' ', 2)
+WHERE first_name IS NULL
+LIMIT @batch_size;
+```
+
+#### Deployment Ordering Rule
+
+| Scenario | Order |
+|----------|-------|
+| Add column | Schema first → then code |
+| Drop column | Code first (stop reading) → then schema |
+| Rename / change type | Expand → Migrate → Contract (3 deploys) |
+
+#### CI Check for Destructive Changes
 
 ```bash
 # atlas migrate lint detects DROP TABLE, DROP COLUMN, etc.
@@ -393,12 +456,13 @@ func (r *orderRepository) GetByID(ctx context.Context, id uuid.UUID) (*entity.Or
         }
         return nil, err
     }
-    return r.toEntity(row)
+    return r.toEntity(*row)
 }
 
 func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
     q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
     // NOT NULL columns → plain types; nullable columns → sqlutil helpers
+    // emit_result_struct_pointers: true → CreateOrder returns *sqlcgen.Order
     row, err := q.CreateOrder(ctx, sqlcgen.CreateOrderParams{
         UserID:   o.UserID,
         Status:   o.Status.String(),
@@ -415,6 +479,8 @@ func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
     return nil
 }
 
+// toEntity maps sqlc generated struct to domain entity.
+// Callers dereference the pointer from sqlc (*sqlcgen.Order → sqlcgen.Order).
 func (r *orderRepository) toEntity(row sqlcgen.Order) (*entity.Order, error) {
     status, err := entity.OrderStatusString(row.Status)
     if err != nil {
@@ -440,6 +506,128 @@ func (r *orderRepository) toEntity(row sqlcgen.Order) (*entity.Order, error) {
 - **TX Support**: `database.GetDBTX(ctx, pool)` returns the transaction from context if available, otherwise the pool. This enables repositories to participate in transactions transparently. See [TxManager](async-patterns.md#txmanager-async) for the implementation that injects TX into context.
 - **Not Found Pattern**: Return `nil, domain.ErrXxxNotFound` for not found. Repository maps `pgx.ErrNoRows` to domain error; UseCase handles it directly via `errors.Is`.
 - **Type Conventions**: NOT NULL columns use plain types (`string`, `int64`) directly. Nullable columns use `sqlutil` helpers: `sqlutil.Text(s)` / `sqlutil.TextValue(t)` for `pgtype.Text`, etc.
+
+## Keyset Pagination
+
+Keyset pagination (also called cursor-based pagination) avoids `OFFSET` performance degradation on large datasets. See [grpc-patterns.md → API Pagination](grpc-patterns.md#api-pagination) for proto definitions and strategy selection.
+
+### Cursor Struct
+
+```go
+// pkg/pagination/cursor.go
+package pagination
+
+import (
+    "encoding/base64"
+    "encoding/json"
+    "fmt"
+    "time"
+
+    "github.com/google/uuid"
+)
+
+// Cursor uses composite key (sort_value + unique_id) to guarantee no skipped/duplicate rows.
+type Cursor struct {
+    CreatedAt time.Time `json:"t"`
+    ID        uuid.UUID `json:"id"`
+}
+
+func EncodeCursor(createdAt time.Time, id uuid.UUID) string {
+    data, _ := json.Marshal(Cursor{CreatedAt: createdAt, ID: id})
+    return base64.URLEncoding.EncodeToString(data)
+}
+
+func DecodeCursor(token string) (*Cursor, error) {
+    if token == "" {
+        return nil, nil // First page
+    }
+    data, err := base64.URLEncoding.DecodeString(token)
+    if err != nil {
+        return nil, fmt.Errorf("invalid cursor: %w", err)
+    }
+    var c Cursor
+    if err := json.Unmarshal(data, &c); err != nil {
+        return nil, fmt.Errorf("invalid cursor: %w", err)
+    }
+    return &c, nil
+}
+```
+
+### SQL Query (sqlc)
+
+```sql
+-- name: ListOrdersByUser :many
+SELECT * FROM orders
+WHERE user_id = @user_id
+  AND CASE WHEN @has_cursor::bool
+    THEN (created_at, id) < (@cursor_time, @cursor_id)
+    ELSE TRUE
+  END
+ORDER BY created_at DESC, id DESC
+LIMIT @page_size;
+```
+
+### Repository Implementation
+
+```go
+func (r *orderRepository) ListByUserID(ctx context.Context, userID uuid.UUID, cursor *pagination.Cursor, pageSize int) ([]*entity.Order, error) {
+    q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
+
+    hasCursor := cursor != nil
+    var cursorTime time.Time
+    var cursorID uuid.UUID
+    if hasCursor {
+        cursorTime = cursor.CreatedAt
+        cursorID = cursor.ID
+    }
+
+    rows, err := q.ListOrdersByUser(ctx, sqlcgen.ListOrdersByUserParams{
+        UserID:     userID,
+        HasCursor:  hasCursor,
+        CursorTime: cursorTime,
+        CursorID:   cursorID,
+        PageSize:   int32(pageSize),
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    orders := make([]*entity.Order, 0, len(rows))
+    for _, row := range rows {
+        o, err := r.toEntity(*row)
+        if err != nil { return nil, err }
+        orders = append(orders, o)
+    }
+    return orders, nil
+}
+```
+
+### UseCase: Fetch N+1 Pattern
+
+Fetch `pageSize + 1` rows. If returned count > `pageSize`, there are more pages:
+
+```go
+func (u *OrderUseCase) List(ctx context.Context, userID uuid.UUID, cursorToken string, pageSize int) ([]*entity.Order, string, error) {
+    cursor, err := pagination.DecodeCursor(cursorToken)
+    if err != nil {
+        return nil, "", domain.ErrInvalidCursor
+    }
+
+    orders, err := u.repo.ListByUserID(ctx, userID, cursor, pageSize+1)
+    if err != nil {
+        return nil, "", err
+    }
+
+    var nextCursor string
+    if len(orders) > pageSize {
+        orders = orders[:pageSize]
+        last := orders[len(orders)-1]
+        nextCursor = pagination.EncodeCursor(last.CreatedAt, last.ID)
+    }
+
+    return orders, nextCursor, nil
+}
+```
 
 ## Connection Pool Tuning
 
