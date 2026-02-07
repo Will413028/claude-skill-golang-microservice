@@ -652,9 +652,22 @@ func (m *PgxTxManager) WithTx(ctx context.Context, fn func(txCtx context.Context
     // fn already completed successfully — losing the commit would silently discard the work.
     return tx.Commit(context.WithoutCancel(ctx))
 }
+```
+
+```go
+// pkg/database/dbtx.go
+
+// DBTX — shared interface satisfied by both pgxpool.Pool and pgx.Tx (Go structural typing).
+// Each service's sqlcgen.DBTX is identical, but we define a shared one here to avoid
+// coupling pkg/database to any service's generated code.
+type DBTX interface {
+    Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+    Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+    QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 // GetDBTX lets Repository dynamically choose TX or pool
-func GetDBTX(ctx context.Context, pool *pgxpool.Pool) sqlcgen.DBTX {
+func GetDBTX(ctx context.Context, pool *pgxpool.Pool) DBTX {
     if tx, ok := ctx.Value(txKey).(pgx.Tx); ok { return tx }
     return pool
 }

@@ -65,9 +65,9 @@ Complete guide for implementing observability in Go microservices using **Grafan
 // go.mod
 require (
     go.uber.org/zap v1.27.0
-    go.opentelemetry.io/otel v1.24.0
-    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.24.0
-    go.opentelemetry.io/otel/sdk v1.24.0
+    go.opentelemetry.io/otel v1.28.0
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.28.0
+    go.opentelemetry.io/otel/sdk v1.28.0
     github.com/prometheus/client_golang v1.19.0
 )
 ```
@@ -259,26 +259,21 @@ package logger
 import (
     "errors"
     "go.uber.org/zap"
-    "go.uber.org/zap/zapcore"
+
+    pkgerrors "github.com/yourproject/go-pkg/errors"
 )
 
-// DomainError represents a business error with code
-type DomainError interface {
-    error
-    Code() string
-    Unwrap() error
-}
-
 // ErrorFields extracts structured fields from an error
+// Uses the shared DomainError interface from pkg/errors (see grpc-patterns.md)
 func ErrorFields(err error) []zap.Field {
     fields := []zap.Field{
         zap.Error(err),
     }
 
     // Extract domain error code
-    var domainErr DomainError
-    if errors.As(err, &domainErr) {
-        fields = append(fields, zap.String("error_code", domainErr.Code()))
+    var domErr pkgerrors.DomainError
+    if errors.As(err, &domErr) {
+        fields = append(fields, zap.Int("error_code", int(domErr.DomainCode())))
     }
 
     return fields
@@ -622,86 +617,7 @@ func Tracing(serviceName string) gin.HandlerFunc {
 
 ### MQ Trace Propagation
 
-```go
-// pkg/mq/trace.go
-package mq
-
-import (
-    "context"
-
-    amqp "github.com/rabbitmq/amqp091-go"
-    "go.opentelemetry.io/otel"
-    "go.opentelemetry.io/otel/propagation"
-)
-
-// AMQPCarrier implements propagation.TextMapCarrier for AMQP headers
-type AMQPCarrier amqp.Table
-
-func (c AMQPCarrier) Get(key string) string {
-    if v, ok := c[key]; ok {
-        if s, ok := v.(string); ok {
-            return s
-        }
-    }
-    return ""
-}
-
-func (c AMQPCarrier) Set(key, value string) {
-    c[key] = value
-}
-
-func (c AMQPCarrier) Keys() []string {
-    keys := make([]string, 0, len(c))
-    for k := range c {
-        keys = append(keys, k)
-    }
-    return keys
-}
-
-// InjectTraceContext injects trace context into AMQP headers
-func InjectTraceContext(ctx context.Context, headers amqp.Table) {
-    otel.GetTextMapPropagator().Inject(ctx, AMQPCarrier(headers))
-}
-
-// ExtractTraceContext extracts trace context from AMQP headers
-func ExtractTraceContext(ctx context.Context, headers amqp.Table) context.Context {
-    return otel.GetTextMapPropagator().Extract(ctx, AMQPCarrier(headers))
-}
-```
-
-**Publisher:**
-
-```go
-func (p *Publisher) Publish(ctx context.Context, event Event) error {
-    headers := amqp.Table{}
-    mq.InjectTraceContext(ctx, headers)
-
-    return p.channel.PublishWithContext(ctx, p.exchange, event.RoutingKey(),
-        false, false,
-        amqp.Publishing{
-            Headers:     headers,
-            ContentType: "application/json",
-            Body:        event.Payload(),
-        },
-    )
-}
-```
-
-**Consumer:**
-
-```go
-func (c *Consumer) handleMessage(delivery amqp.Delivery) {
-    // Extract trace context from message
-    ctx := mq.ExtractTraceContext(context.Background(), delivery.Headers)
-
-    // Start a new span as child of the extracted context
-    tracer := otel.Tracer("mq-consumer")
-    ctx, span := tracer.Start(ctx, c.queueName+" process")
-    defer span.End()
-
-    // Process message...
-}
-```
+See [grpc-patterns.md — MQ Trace Context Propagation](grpc-patterns.md#mq-trace-context-propagation) for the canonical `AMQPCarrier` implementation (`pkg/mq/rabbitmq/trace.go`) and publisher/consumer usage examples.
 
 ### Sampling Strategy
 

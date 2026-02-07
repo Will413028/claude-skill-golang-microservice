@@ -23,7 +23,7 @@ built on Clean Architecture + gRPC + PostgreSQL + RabbitMQ.
 | Language | Go 1.24+ |
 | API Gateway | Apache APISIX |
 | Service Communication | gRPC + Protocol Buffers |
-| Database | PostgreSQL 18 |
+| Database | PostgreSQL 17 |
 | Cache | Redis 8 |
 | Message Queue | RabbitMQ |
 | Object Storage | MinIO |

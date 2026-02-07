@@ -106,12 +106,12 @@ Service 封裝**可重用的基礎操作**，每個 Service 對應一個 Aggrega
 ```go
 // application/service/address_service.go
 type AddressService interface {
-    Get(ctx context.Context, id int64) (*response.Address, error)
-    List(ctx context.Context, accountID int64) ([]*response.Address, error)
+    Get(ctx context.Context, id uuid.UUID) (*response.Address, error)
+    List(ctx context.Context, accountID uuid.UUID) ([]*response.Address, error)
     Create(ctx context.Context, req *request.CreateAddress) error
     Update(ctx context.Context, req *request.UpdateAddress) error
-    Delete(ctx context.Context, id int64) error
-    SetDefault(ctx context.Context, accountID, addressID int64) error
+    Delete(ctx context.Context, id uuid.UUID) error
+    SetDefault(ctx context.Context, accountID, addressID uuid.UUID) error
 }
 
 type addressService struct {

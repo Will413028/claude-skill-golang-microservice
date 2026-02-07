@@ -361,6 +361,7 @@ package persistence
 import (
     "context"
     "errors"
+    "github.com/google/uuid"
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/yourproject/go-pkg/database"
@@ -379,7 +380,7 @@ func NewOrderRepository(pool *pgxpool.Pool) repository.OrderRepository {
     return &orderRepository{pool: pool}
 }
 
-func (r *orderRepository) GetByID(ctx context.Context, id int64) (*entity.Order, error) {
+func (r *orderRepository) GetByID(ctx context.Context, id uuid.UUID) (*entity.Order, error) {
     // Inline pattern: sqlcgen.New() + database.GetDBTX() for TX support
     q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
     row, err := q.GetOrderByID(ctx, id)
@@ -395,10 +396,10 @@ func (r *orderRepository) GetByID(ctx context.Context, id int64) (*entity.Order,
 func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
     q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
     row, err := q.CreateOrder(ctx, sqlcgen.CreateOrderParams{
-        UserID:    o.UserID,
-        Status:    sqlutil.Text(o.Status),
-        Amount:    sqlutil.Int8(o.Amount),
-        CreatedAt: sqlutil.Timestamptz(o.CreatedAt),
+        UserID:   o.UserID,
+        Status:   sqlutil.Text(o.Status.String()),
+        Amount:   sqlutil.Int8(o.TotalAmount.Amount),
+        Currency: sqlutil.Text(o.TotalAmount.Currency),
     })
     if err != nil {
         return err
@@ -409,11 +410,16 @@ func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
 
 func (r *orderRepository) toEntity(row sqlcgen.Order) *entity.Order {
     return &entity.Order{
-        ID:        row.ID,
-        UserID:    row.UserID,
-        Status:    sqlutil.TextValue(row.Status),
-        Amount:    sqlutil.Int8Value(row.Amount),
+        ID:     row.ID,
+        UserID: row.UserID,
+        Status: entity.OrderStatusFromString(sqlutil.TextValue(row.Status)),
+        TotalAmount: valueobject.Money{
+            Amount:   sqlutil.Int8Value(row.Amount),
+            Currency: sqlutil.TextValue(row.Currency),
+        },
+        Version:   int(sqlutil.Int4Value(row.Version)),
         CreatedAt: sqlutil.TimestamptzValue(row.CreatedAt),
+        UpdatedAt: sqlutil.TimestamptzValue(row.UpdatedAt),
     }
 }
 ```

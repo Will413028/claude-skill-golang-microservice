@@ -47,6 +47,9 @@ const (
     ErrCodeConflict                            // Concurrent conflict (optimistic lock)
     ErrCodeAborted                             // Operation aborted (e.g., saga rollback)
     ErrCodeInternal                            // Unexpected internal error
+    ErrCodeUnauthorized                        // Missing or invalid auth credentials
+    ErrCodeForbidden                           // Authenticated but not authorized
+    ErrCodeRateLimited                         // Rate limit exceeded
 )
 
 // DomainError — any error implementing this interface gets auto-mapped by Interceptor
@@ -120,7 +123,7 @@ func WrapErr(err error, msg string) error {
 
 **Usage**:
 ```go
-func (s *userService) GetByID(ctx context.Context, id int64) (*entity.User, error) {
+func (s *userService) GetByID(ctx context.Context, id uuid.UUID) (*entity.User, error) {
     user, err := s.repo.GetByID(ctx, id)
     if err != nil {
         return nil, pkgerrors.WrapErr(err, "repo.GetByID failed")
@@ -151,6 +154,9 @@ var domainCodeToGRPC = map[pkgerrors.ErrorCode]codes.Code{
     pkgerrors.ErrCodeConflict:           codes.Aborted,
     pkgerrors.ErrCodeAborted:            codes.Aborted,
     pkgerrors.ErrCodeInternal:           codes.Internal,
+    pkgerrors.ErrCodeUnauthorized:       codes.Unauthenticated,
+    pkgerrors.ErrCodeForbidden:          codes.PermissionDenied,
+    pkgerrors.ErrCodeRateLimited:        codes.ResourceExhausted,
 }
 
 func ErrorMappingInterceptor() grpc.UnaryServerInterceptor {

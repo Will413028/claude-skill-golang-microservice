@@ -562,10 +562,14 @@ import (
 )
 
 func (h *OrderHandler) handleError(c *gin.Context, err error) {
-    var domainErr *pkgerrors.DomainError
-    if errors.As(err, &domainErr) {
-        httpStatus, errCode := mapDomainErrorToHTTP(domainErr.Code)
-        response.Error(c, httpStatus, errCode, domainErr.Message)
+    var domErr pkgerrors.DomainError
+    if errors.As(err, &domErr) {
+        httpStatus, errCode := mapDomainErrorToHTTP(domErr.DomainCode())
+        msg := domErr.Error()
+        if cm, ok := err.(pkgerrors.ClientMessage); ok {
+            msg = cm.ClientMsg()
+        }
+        response.Error(c, httpStatus, errCode, msg)
         return
     }
 
@@ -590,6 +594,10 @@ func mapDomainErrorToHTTP(code pkgerrors.ErrorCode) (httpStatus int, errCode int
         return http.StatusConflict, 1006
     case pkgerrors.ErrCodeRateLimited:
         return http.StatusTooManyRequests, 1007
+    case pkgerrors.ErrCodeAlreadyExists:
+        return http.StatusConflict, 1008
+    case pkgerrors.ErrCodeAborted:
+        return http.StatusConflict, 1009
     default:
         return http.StatusInternalServerError, 5000
     }
