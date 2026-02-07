@@ -338,6 +338,7 @@ import (
 
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/require"
+    "github.com/yourproject/order-service/internal/domain"
     "github.com/yourproject/order-service/internal/domain/entity"
 )
 
@@ -363,7 +364,7 @@ func TestOrder_Confirm(t *testing.T) {
 
         err := order.Confirm(now)
 
-        assert.ErrorIs(t, err, entity.ErrInvalidTransition)
+        assert.ErrorIs(t, err, domain.ErrInvalidTransition)
         assert.Equal(t, entity.OrderStatusPaid, order.Status) // Status unchanged
         assert.Empty(t, order.Events())                        // No event on failure
     })
@@ -437,7 +438,7 @@ func TestConfirmOrderUseCase(t *testing.T) {
         uc := orderuc.NewConfirmOrderUseCase(repo)
         err := uc.Execute(ctx, orderID)
 
-        assert.ErrorIs(t, err, entity.ErrInvalidTransition)
+        assert.ErrorIs(t, err, domain.ErrInvalidTransition)
         repo.AssertNotCalled(t, "Update") // Update should NOT be called
     })
 }

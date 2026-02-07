@@ -79,7 +79,7 @@ type statsContentHourlyJob struct {
     statsRepo   repository.StatsRepository
 }
 
-func newStatsContentHourlyJob(
+func NewStatsContentHourlyJob(
     contentRepo repository.ContentRepository,
     statsRepo repository.StatsRepository,
 ) StatsContentHourlyJob {

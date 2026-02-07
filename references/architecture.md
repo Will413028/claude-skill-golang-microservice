@@ -192,9 +192,9 @@ package service
 
 func Module() fx.Option {
     return fx.Options(
-        fx.Provide(newAddressService),
-        fx.Provide(newPointsService),
-        fx.Provide(newAccountService),
+        fx.Provide(fx.Annotate(NewAddressService, fx.As(new(AddressService)))),
+        fx.Provide(fx.Annotate(NewPointsService, fx.As(new(PointsService)))),
+        fx.Provide(fx.Annotate(NewAccountService, fx.As(new(AccountService)))),
     )
 }
 
@@ -203,22 +203,12 @@ package checkoutuc
 
 func Module() fx.Option {
     return fx.Options(
-        fx.Provide(newCheckoutUseCase),
+        fx.Provide(fx.Annotate(NewCheckoutUseCase, fx.As(new(input.CheckoutUseCase)))),
     )
 }
-
-// infrastructure/fx/module.go — Root Module composes all sub-modules
-var Module = fx.Options(
-    ConfigModule,
-    DatabaseModule,
-    persistence.Module(),
-    service.Module(),
-    checkoutuc.Module(),
-    oauthuc.Module(),
-    certuc.Module(),
-    grpchandler.Module(),
-)
 ```
+
+`main.go` 直接組合所有 Module（見 [Complete main.go Example](#complete-maingo-example)），不使用 Root Module 變數。
 
 ### 簡單 Service 可省略 UseCase
 

@@ -110,8 +110,8 @@ func (o *Order) transitionTo(target OrderStatus, now time.Time) error {
 }
 
 // Public methods expose business operations, not raw transitions
-func (o *Order) Confirm(now time.Time) error { return o.transitionTo(StatusConfirmed, now) }
-func (o *Order) Cancel(now time.Time) error  { return o.transitionTo(StatusCancelled, now) }
+func (o *Order) Confirm(now time.Time) error { return o.transitionTo(OrderStatusConfirmed, now) }
+func (o *Order) Cancel(now time.Time) error  { return o.transitionTo(OrderStatusCancelled, now) }
 ```
 
 ## Value Object
@@ -203,7 +203,7 @@ UPDATE orders SET status = $2 WHERE id = $1;
 
 ```go
 // Repository uses enum directly
-func (r *repo) UpdateStatus(ctx context.Context, id uuid.UUID, status valueobject.OrderStatus) error {
+func (r *repo) UpdateStatus(ctx context.Context, id uuid.UUID, status entity.OrderStatus) error {
     return r.q.UpdateOrderStatus(ctx, id, status)  // enum auto-converts via Value()
 }
 ```
@@ -212,7 +212,7 @@ func (r *repo) UpdateStatus(ctx context.Context, id uuid.UUID, status valueobjec
 
 1. **First value = zero/unknown**: Start with `Unspecified` or `Unknown` as `iota` value 0
 2. **Prefix convention**: Use type name as prefix (`OrderStatusPending`), trim with `-trimprefix`
-3. **Location**: Place enums in `domain/valueobject/` (they are value objects)
+3. **Location**: Place enums in `domain/entity/` alongside the Entity that owns the status
 4. **Generate on CI**: Include `go generate ./...` in CI pipeline
 
 ## Repository Interface
