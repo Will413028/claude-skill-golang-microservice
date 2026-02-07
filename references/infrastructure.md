@@ -2,8 +2,7 @@
 
 ## Table of Contents
 
-- [Observability](#observability)
-- [Tracing Sampling Strategy](#tracing-sampling-strategy)
+- [Graceful Shutdown](#graceful-shutdown)
 - [Alert Rules](#alert-rules)
 - [Testing Strategy](#testing-strategy)
 - [CI/CD Pipeline](#cicd-pipeline)
@@ -12,77 +11,249 @@
 
 ## Observability
 
-| Pillar | Tooling | Stage |
-|--------|---------|-------|
-| Logs | Zap JSON → Loki | MVP |
-| Traces | OTel SDK → Tempo | MVP |
-| Metrics | Prometheus → Grafana | Async |
-| Alerting | Alertmanager | Hardening |
+See [observability.md](observability.md) for complete observability implementation including:
+- Logging (Zap + Loki)
+- Tracing (OTel + Tempo) with sampling strategies
+- Metrics (Prometheus + Mimir)
+- Grafana dashboards and alerts
 
-## Tracing Sampling Strategy
+## Graceful Shutdown
 
-| Environment | Strategy | Sampling Rate | Rationale |
-|-------------|----------|---------------|-----------|
-| Development | AlwaysOn | 100% | Full traces for debugging |
-| Staging | AlwaysOn | 100% | Load testing, E2E tests need complete data |
-| Production | TraceIDRatioBased | 10–20% | Balance observability vs performance overhead |
-| Production (high-traffic QPS > 10K) | TraceIDRatioBased | 1–5% | Further reduce overhead |
+Proper shutdown order ensures no requests are dropped and all resources are cleaned up correctly.
+
+### Shutdown Sequence
+
+```
+1. Set Health Check to NOT_SERVING
+   ↓ (wait for K8s endpoint removal)
+2. Stop accepting new requests (gRPC/HTTP)
+   ↓
+3. Drain in-flight requests
+   ↓
+4. Stop Cron Scheduler
+   ↓
+5. Stop MQ Consumers (drain in-flight messages)
+   ↓
+6. Stop Outbox Poller
+   ↓
+7. Close MQ Connection
+   ↓
+8. Close Redis Connection
+   ↓
+9. Close DB Connection Pool
+```
+
+### Implementation with Uber Fx
 
 ```go
-// pkg/observability/tracer.go
-func NewTracerProvider(cfg *config.Config) (*sdktrace.TracerProvider, error) {
-    exporter, err := otlptracegrpc.New(context.Background(),
-        otlptracegrpc.WithEndpoint(cfg.OTel.Endpoint),
-        otlptracegrpc.WithInsecure(),
+// cmd/main.go
+func main() {
+    app := fx.New(
+        fx.Provide(config.Load),
+        fx.Provide(logger.New),
+        infrastructure.Module,
+        adapter.Module,
+        application.Module,
+        fx.Invoke(registerLifecycle),
     )
-    if err != nil { return nil, fmt.Errorf("create exporter: %w", err) }
+    app.Run()
+}
 
-    var sampler sdktrace.Sampler
-    switch cfg.Environment {
-    case "production":
-        // ParentBased ensures:
-        // 1. Upstream already sampled → continue sampling (preserve trace completeness)
-        // 2. Upstream not sampled → don't sample (follow upstream decision)
-        // 3. No upstream (root span) → sample by ratio
-        sampler = sdktrace.ParentBased(
-            sdktrace.TraceIDRatioBased(cfg.OTel.SamplingRate), // Recommend 0.1–0.2
-        )
-    default:
-        sampler = sdktrace.AlwaysSample()
-    }
+// internal/infrastructure/fx/lifecycle.go
+func registerLifecycle(
+    lc fx.Lifecycle,
+    cfg *config.Config,
+    logger *zap.Logger,
+    grpcServer *grpc.Server,
+    healthServer *health.Server,
+    scheduler *cron.Scheduler,
+    mqConn *amqp.Connection,
+    consumer *mq.Consumer,
+    poller *outbox.Poller,
+    redisClient *redis.Client,
+    dbPool *pgxpool.Pool,
+) {
+    var listener net.Listener
 
-    tp := sdktrace.NewTracerProvider(
-        sdktrace.WithBatcher(exporter),
-        sdktrace.WithSampler(sampler),
-        sdktrace.WithResource(resource.NewWithAttributes(
-            semconv.SchemaURL,
-            semconv.ServiceNameKey.String(cfg.ServiceName),
-            attribute.String("environment", cfg.Environment),
-        )),
-    )
-    return tp, nil
+    lc.Append(fx.Hook{
+        OnStart: func(ctx context.Context) error {
+            var err error
+            listener, err = net.Listen("tcp", ":"+cfg.Server.GRPCPort)
+            if err != nil {
+                return err
+            }
+
+            // Start components
+            go grpcServer.Serve(listener)
+            scheduler.Start()
+            consumer.Start()
+            poller.Start()
+
+            logger.Info("service started",
+                zap.String("grpc_port", cfg.Server.GRPCPort),
+            )
+            return nil
+        },
+        OnStop: func(ctx context.Context) error {
+            logger.Info("shutdown initiated")
+
+            // 1. Set health to NOT_SERVING (K8s removes from endpoints)
+            healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+            logger.Info("health set to NOT_SERVING")
+
+            // 2. Wait for K8s endpoint removal (matches preStop hook)
+            time.Sleep(5 * time.Second)
+
+            // 3. Stop accepting new gRPC requests, drain in-flight
+            grpcServer.GracefulStop()
+            logger.Info("gRPC server stopped")
+
+            // 4. Stop scheduler
+            <-scheduler.Stop().Done()
+            logger.Info("cron scheduler stopped")
+
+            // 5. Stop MQ consumer (drain in-flight messages)
+            consumer.Stop()
+            logger.Info("MQ consumer stopped")
+
+            // 6. Stop outbox poller
+            poller.Stop()
+            logger.Info("outbox poller stopped")
+
+            // 7. Close MQ connection
+            if err := mqConn.Close(); err != nil {
+                logger.Warn("failed to close MQ connection", zap.Error(err))
+            }
+            logger.Info("MQ connection closed")
+
+            // 8. Close Redis
+            if err := redisClient.Close(); err != nil {
+                logger.Warn("failed to close Redis", zap.Error(err))
+            }
+            logger.Info("Redis connection closed")
+
+            // 9. Close DB pool
+            dbPool.Close()
+            logger.Info("DB pool closed")
+
+            logger.Info("shutdown complete")
+            return nil
+        },
+    })
 }
 ```
 
-### Advanced: Tail-Based Sampling
+### MQ Consumer Graceful Shutdown
 
-Head-Based Sampling decides at trace start — may miss important error traces. When observability requirements increase, configure Tail-Based Sampling at OTel Collector layer (no application code changes needed):
+```go
+// internal/adapter/inbound/mq/consumer.go
+type Consumer struct {
+    channel    *amqp.Channel
+    done       chan struct{}
+    wg         sync.WaitGroup
+    handlers   map[string]MessageHandler
+}
 
-```yaml
-# otel-collector-config.yaml
-processors:
-  tail_sampling:
-    policies:
-      - name: error-policy
-        type: status_code
-        status_code: { status_codes: [ERROR] }  # All error traces 100% retained
-      - name: slow-policy
-        type: latency
-        latency: { threshold_ms: 1000 }          # > 1s traces 100% retained
-      - name: default-policy
-        type: probabilistic
-        probabilistic: { sampling_percentage: 10 } # Rest 10% sampled
+func (c *Consumer) Start() {
+    c.done = make(chan struct{})
+
+    for queue, handler := range c.handlers {
+        c.wg.Add(1)
+        go c.consume(queue, handler)
+    }
+}
+
+func (c *Consumer) Stop() {
+    close(c.done)  // Signal all consumers to stop
+    c.wg.Wait()    // Wait for in-flight messages to complete
+}
+
+func (c *Consumer) consume(queue string, handler MessageHandler) {
+    defer c.wg.Done()
+
+    msgs, err := c.channel.Consume(queue, "", false, false, false, false, nil)
+    if err != nil {
+        zap.L().Error("failed to start consumer", zap.String("queue", queue), zap.Error(err))
+        return
+    }
+
+    for {
+        select {
+        case <-c.done:
+            // Graceful shutdown: stop accepting new messages
+            // In-flight message (if any) will complete before wg.Done()
+            return
+        case msg, ok := <-msgs:
+            if !ok {
+                return
+            }
+            if err := handler.Handle(context.Background(), msg); err != nil {
+                msg.Nack(false, !isPermanentError(err))
+            } else {
+                msg.Ack(false)
+            }
+        }
+    }
+}
 ```
+
+### Outbox Poller Graceful Shutdown
+
+```go
+// internal/infrastructure/outbox/poller.go
+type Poller struct {
+    done   chan struct{}
+    wg     sync.WaitGroup
+    ticker *time.Ticker
+}
+
+func (p *Poller) Start() {
+    p.done = make(chan struct{})
+    p.ticker = time.NewTicker(5 * time.Second)
+
+    p.wg.Add(1)
+    go p.poll()
+}
+
+func (p *Poller) Stop() {
+    p.ticker.Stop()
+    close(p.done)
+    p.wg.Wait()
+}
+
+func (p *Poller) poll() {
+    defer p.wg.Done()
+
+    for {
+        select {
+        case <-p.done:
+            return
+        case <-p.ticker.C:
+            p.processOutbox()
+        }
+    }
+}
+```
+
+### Key Points
+
+| Component | Shutdown Action | Wait For |
+|-----------|-----------------|----------|
+| Health Check | Set NOT_SERVING | K8s endpoint removal (5s) |
+| gRPC Server | GracefulStop() | In-flight requests complete |
+| Cron Scheduler | Stop() | Current job completes |
+| MQ Consumer | Close done channel | WaitGroup (in-flight messages) |
+| Outbox Poller | Close done channel | WaitGroup (current batch) |
+| MQ Connection | Close() | — |
+| Redis | Close() | — |
+| DB Pool | Close() | — |
+
+### Common Mistakes
+
+1. **Closing DB before draining requests** → In-flight requests fail with "connection closed"
+2. **Not waiting for K8s endpoint removal** → Traffic still routes to terminating pod
+3. **Force killing consumers** → Messages lost or redelivered
+4. **Not logging shutdown progress** → Hard to debug shutdown issues
 
 ## Alert Rules
 

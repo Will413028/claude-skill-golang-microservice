@@ -151,7 +151,9 @@ Every new project follows these four stages. Determine the current stage to deci
 
 ### Hardening — Must Do
 
-1. **Graceful Shutdown**: gRPC GracefulStop → Consumer drain → Poller Stop → MQ Close → DB Close
+1. **Graceful Shutdown** → Read [references/infrastructure.md](references/infrastructure.md)
+   - Shutdown sequence: Health NOT_SERVING → gRPC GracefulStop → Consumer drain → Poller Stop → MQ/Redis/DB Close
+   - Fx Lifecycle hooks for coordinated shutdown
 2. **gRPC Health Check Service** → Read [references/infrastructure.md](references/infrastructure.md)
    - `grpc.health.v1.Health` registration (required for K8s probes)
    - Dependency health monitoring (DB + Redis → readiness status)
