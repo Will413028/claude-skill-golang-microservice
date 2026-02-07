@@ -388,39 +388,9 @@ Initially all services share a single `go.mod`. When service count exceeds 5–8
 
 ## Uber Fx Dependency Injection
 
-Uber Fx wires all layers together. Each layer exposes an `fx.Option` (Module) that provides its implementations.
+Uber Fx wires all layers together. Each package contains its own `di.go` with a `Module()` function.
 
-### Module Organization Strategies
-
-Two approaches for organizing Fx modules. Choose based on project size:
-
-#### Strategy A: Centralized (Small Projects < 10 UseCases)
-
-All DI configuration in `infrastructure/fx/`:
-
-```
-internal/infrastructure/fx/
-├── module.go            # Root module: combines all sub-modules
-├── config_module.go     # Config loading
-├── database_module.go   # PG pool + TxManager
-├── logger_module.go     # Zap logger
-├── grpc_module.go       # gRPC server + interceptors
-├── usecase_module.go    # UseCases
-├── repository_module.go # Repository implementations
-└── ...
-```
-
-```go
-// internal/infrastructure/fx/usecase_module.go
-var UseCaseModule = fx.Options(
-    fx.Provide(usecase.NewCreateOrderUseCase),
-    fx.Provide(usecase.NewCancelOrderUseCase),
-)
-```
-
-#### Strategy B: Distributed (Medium-Large Projects ≥ 10 UseCases) — Recommended
-
-Each package contains its own `di.go` with a `Module()` function:
+### Module Layout
 
 ```
 internal/
@@ -434,6 +404,10 @@ internal/
 │           ├── di.go
 │           └── process_payment.go
 ├── adapter/
+│   ├── inbound/
+│   │   └── grpc/
+│   │       ├── di.go              # Handler module
+│   │       └── order_handler.go
 │   └── outbound/
 │       └── persistence/
 │           ├── di.go              # Repository module
@@ -444,6 +418,10 @@ internal/
         └── module.go              # Root: combines all sub-modules
 ```
 
+### Package-Level `di.go`
+
+Each package exposes a `Module()` function:
+
 ```go
 // internal/application/usecase/orderuc/di.go
 package orderuc
@@ -452,11 +430,23 @@ import "go.uber.org/fx"
 
 func Module() fx.Option {
     return fx.Options(
-        fx.Provide(newCreateOrderUseCase),  // lowercase: unexported
+        fx.Provide(newCreateOrderUseCase),  // lowercase: unexported constructor
         fx.Provide(newCancelOrderUseCase),
     )
 }
+```
 
+**Benefits**:
+
+- Constructor 可以用小寫 (`newXxx`)，不需 export
+- 新增 UseCase 只改該 package 的 `di.go`，減少 merge conflicts
+- Package 自包含，易於維護
+
+### Root Module
+
+Infrastructure 的 `module.go` 組合所有 sub-modules：
+
+```go
 // internal/infrastructure/fx/module.go
 var Module = fx.Options(
     // Infrastructure
@@ -474,19 +464,6 @@ var Module = fx.Options(
     grpchandler.Module(),
 )
 ```
-
-#### Strategy Comparison
-
-| Aspect | Centralized | Distributed `di.go` |
-|--------|-------------|---------------------|
-| Add new UseCase | Edit `usecase_module.go` | Edit package's `di.go` |
-| Constructor visibility | Must be exported (`NewXxx`) | Can be unexported (`newXxx`) |
-| Merge conflicts | High (shared file) | Low (package-local) |
-| Discoverability | One place to see all | Each package self-contained |
-| Large team | ❌ Bottleneck | ✅ Independent |
-| Circular dependency risk | Medium | Low |
-
-**Recommendation**: Start with Centralized for MVP. Migrate to Distributed when UseCase count exceeds 10 or team grows.
 
 ### Wiring Pattern
 
