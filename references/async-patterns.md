@@ -11,6 +11,7 @@ Covers MQ consumer patterns, Saga orchestration, and Outbox pattern for reliable
   - [Transient vs Permanent Error](#transient-vs-permanent-error)
   - [Event Version Handling in Consumer](#event-version-handling-in-consumer)
   - [Consumer Graceful Shutdown](#consumer-graceful-shutdown)
+  - [Connection Manager (Auto-Reconnect)](#connection-manager-auto-reconnect)
 - [Synchronous Saga (MVP Stage)](#synchronous-saga-mvp-stage)
   - [Saga Execution Record Schema](#saga-execution-record-schema)
 - [Stale Record Scanner](#stale-record-scanner)
@@ -195,6 +196,96 @@ func (c *OrderEventConsumer) Stop() error {
 ```
 
 **Shutdown order**: Stop accepting new gRPC requests → Stop consumers (drain in-flight) → Stop Outbox Poller → Close MQ connections → Close DB.
+
+### Connection Manager (Auto-Reconnect)
+
+RabbitMQ connections can drop (network blip, broker restart). Use a ConnectionManager that auto-reconnects with exponential backoff:
+
+```go
+// pkg/mq/rabbitmq/connection_manager.go
+type ConnectionManager struct {
+    url        string
+    conn       *amqp.Connection
+    mu         sync.RWMutex
+    logger     *zap.Logger
+    closeCh    chan struct{}
+}
+
+func NewConnectionManager(url string, logger *zap.Logger) (*ConnectionManager, error) {
+    cm := &ConnectionManager{url: url, logger: logger, closeCh: make(chan struct{})}
+    if err := cm.connect(); err != nil {
+        return nil, fmt.Errorf("initial connection: %w", err)
+    }
+    go cm.watchAndReconnect()
+    return cm, nil
+}
+
+func (cm *ConnectionManager) connect() error {
+    conn, err := amqp.Dial(cm.url)
+    if err != nil {
+        return err
+    }
+    cm.mu.Lock()
+    cm.conn = conn
+    cm.mu.Unlock()
+    return nil
+}
+
+func (cm *ConnectionManager) watchAndReconnect() {
+    for {
+        cm.mu.RLock()
+        notifyClose := cm.conn.NotifyClose(make(chan *amqp.Error, 1))
+        cm.mu.RUnlock()
+
+        select {
+        case <-cm.closeCh:
+            return
+        case err := <-notifyClose:
+            if err == nil {
+                return // Graceful close
+            }
+            cm.logger.Warn("RabbitMQ connection lost, reconnecting...", zap.Error(err))
+            cm.reconnectWithBackoff()
+        }
+    }
+}
+
+func (cm *ConnectionManager) reconnectWithBackoff() {
+    backoff := 1 * time.Second
+    maxBackoff := 30 * time.Second
+
+    for {
+        select {
+        case <-cm.closeCh:
+            return
+        case <-time.After(backoff):
+        }
+
+        if err := cm.connect(); err != nil {
+            cm.logger.Warn("reconnect failed", zap.Error(err), zap.Duration("next_retry", backoff))
+            backoff = min(backoff*2, maxBackoff)
+            continue
+        }
+        cm.logger.Info("RabbitMQ reconnected")
+        return
+    }
+}
+
+func (cm *ConnectionManager) Channel() (*amqp.Channel, error) {
+    cm.mu.RLock()
+    defer cm.mu.RUnlock()
+    return cm.conn.Channel()
+}
+
+func (cm *ConnectionManager) Close() error {
+    close(cm.closeCh)
+    cm.mu.RLock()
+    defer cm.mu.RUnlock()
+    return cm.conn.Close()
+}
+```
+
+**Key**: Consumers must handle channel errors and re-create channels after reconnect. The `NotifyClose` pattern from amqp library signals when the connection is lost.
 
 ## Synchronous Saga (MVP Stage)
 
@@ -557,7 +648,9 @@ func (m *PgxTxManager) WithTx(ctx context.Context, fn func(txCtx context.Context
         }
         return err
     }
-    return tx.Commit(ctx)
+    // WithoutCancel ensures commit succeeds even if caller's ctx is cancelled after fn returns.
+    // fn already completed successfully — losing the commit would silently discard the work.
+    return tx.Commit(context.WithoutCancel(ctx))
 }
 
 // GetDBTX lets Repository dynamically choose TX or pool

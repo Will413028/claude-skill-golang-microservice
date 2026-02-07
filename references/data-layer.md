@@ -4,6 +4,7 @@
 
 - [Database-per-Service](#database-per-service)
 - [Schema Management: sqlc + Atlas](#schema-management-sqlc--atlas)
+  - [Migration Safety & Rollback Strategy](#migration-safety--rollback-strategy)
   - [Nullable Type Helpers (pkg/sqlutil)](#nullable-type-helpers-pkgsqlutil)
   - [Repository Implementation Pattern](#repository-implementation-pattern)
 - [Connection Pool Tuning](#connection-pool-tuning)
@@ -33,14 +34,19 @@ ALTER USER order_svc CONNECTION LIMIT 50;
 
 ```
 services/xxx-service/
-├── schema/schema.sql       # Desired complete schema (single source of truth)
-├── queries/                # sqlc query definitions
-│   ├── order.sql
-│   └── outbox.sql
-├── sqlcgen/                # sqlc auto-generated code
-├── migrations/             # Atlas auto-generated migrations
-└── sqlc.yaml
+├── db/                         # Database-related (centralized)
+│   ├── schema/schema.sql       # Desired complete schema (single source of truth)
+│   ├── queries/                # sqlc query definitions
+│   │   ├── order.sql
+│   │   └── outbox.sql
+│   ├── migrations/             # Atlas auto-generated migrations
+│   ├── sqlc.yaml               # sqlc configuration
+│   └── atlas.hcl               # Atlas configuration
+│
+├── sqlcgen/                    # sqlc auto-generated Go code (service root for import convenience)
 ```
+
+> Run commands from within `db/`: `cd db && sqlc generate`, `cd db && atlas migrate diff ...`
 
 ### Schema Design Example
 
@@ -173,7 +179,7 @@ sql:
     gen:
       go:
         package: "sqlcgen"
-        out: "sqlcgen"
+        out: "../sqlcgen"           # Output to service root (../sqlcgen/ from db/)
         sql_package: "pgx/v5"
         emit_json_tags: true
         emit_result_struct_pointers: true
@@ -187,6 +193,8 @@ sql:
 ### Workflow
 
 ```bash
+# Run all commands from db/ directory: cd services/xxx-service/db
+
 # 1. Edit schema/schema.sql (add columns, indexes, etc.)
 
 # 2. Atlas auto-generates migration
@@ -199,12 +207,36 @@ atlas migrate diff add_new_column \
 
 # 4. Update queries/*.sql (if needed)
 
-# 5. Regenerate Go code
+# 5. Regenerate Go code (outputs to ../sqlcgen/)
 sqlc generate
 
 # 6. Apply migration
 atlas migrate apply --dir "file://migrations" --url "$DATABASE_URL"
 ```
+
+### Migration Safety & Rollback Strategy
+
+Atlas generates forward-only migrations. For safe production rollbacks:
+
+**Backward-compatible changes only** — deploy schema before code:
+
+| Change Type | Safe Strategy | Unsafe |
+|-------------|---------------|--------|
+| Add column | Add as nullable or with default | Add as NOT NULL without default |
+| Remove column | Deploy code first (stop reading), then drop column in next release | Drop column while code still reads it |
+| Rename column | Add new column → copy data → deploy code → drop old column | `ALTER COLUMN RENAME` |
+| Add index | `CREATE INDEX CONCURRENTLY` | `CREATE INDEX` (locks table) |
+| Change type | Add new column → migrate → deploy → drop old | `ALTER COLUMN TYPE` |
+
+**CI check for destructive changes**:
+
+```bash
+# atlas migrate lint detects DROP TABLE, DROP COLUMN, etc.
+atlas migrate lint --dir "file://migrations" \
+  --dev-url "postgres://localhost:5432/dev?sslmode=disable"
+```
+
+**Rollback strategy**: Since schema changes are backward-compatible, rollback = deploy previous code version. The schema supports both old and new code.
 
 ### Nullable Type Helpers (pkg/sqlutil)
 
@@ -328,10 +360,12 @@ package persistence
 
 import (
     "context"
+    "errors"
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/yourproject/go-pkg/database"
     "github.com/yourproject/go-pkg/sqlutil"
+    "github.com/yourproject/order-service/internal/domain"
     "github.com/yourproject/order-service/internal/domain/entity"
     "github.com/yourproject/order-service/internal/domain/repository"
     "github.com/yourproject/order-service/sqlcgen"
@@ -350,8 +384,8 @@ func (r *orderRepository) GetByID(ctx context.Context, id int64) (*entity.Order,
     q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
     row, err := q.GetOrderByID(ctx, id)
     if err != nil {
-        if err == pgx.ErrNoRows {
-            return nil, nil  // Not found returns nil, nil
+        if errors.Is(err, pgx.ErrNoRows) {
+            return nil, domain.ErrOrderNotFound  // Map to Domain Error
         }
         return nil, err
     }
@@ -387,7 +421,7 @@ func (r *orderRepository) toEntity(row sqlcgen.Order) *entity.Order {
 **Key Points:**
 - **No helpers.go**: Don't create a `getQueries()` helper function. Each service has its own `sqlcgen.Queries` type, so it can't be shared. Inline the call directly.
 - **TX Support**: `database.GetDBTX(ctx, pool)` returns the transaction from context if available, otherwise the pool. This enables repositories to participate in transactions transparently.
-- **Not Found Pattern**: Return `nil, nil` for not found, not an error. Let UseCase decide how to handle.
+- **Not Found Pattern**: Return `nil, domain.ErrXxxNotFound` for not found. Repository maps `pgx.ErrNoRows` to domain error; UseCase handles it directly via `errors.Is`.
 - **Type Conventions**: Use `Int4From(int)` / `Int4ToInt()` if your Entity uses `int`, or `Int4(int32)` / `Int4Value()` if it uses `int32`.
 
 ## Connection Pool Tuning

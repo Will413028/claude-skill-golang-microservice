@@ -156,11 +156,12 @@ package valueobject
 type OrderStatus int32
 
 const (
-    OrderStatusPending   OrderStatus = iota // 0
-    OrderStatusConfirmed                    // 1
-    OrderStatusPaid                         // 2
-    OrderStatusShipped                      // 3
-    OrderStatusCancelled                    // 4
+    OrderStatusUnspecified OrderStatus = iota // 0 — proto3 default, distinguishes "not set"
+    OrderStatusPending                        // 1
+    OrderStatusConfirmed                      // 2
+    OrderStatusPaid                           // 3
+    OrderStatusShipped                        // 4
+    OrderStatusCancelled                      // 5
 )
 ```
 
@@ -311,12 +312,9 @@ func (uc *ConfirmOrderUseCase) Execute(ctx context.Context, orderID uuid.UUID) e
 
     for attempt := 0; attempt < maxRetries; attempt++ {
         // 1. Always reload fresh entity from DB
-        order, err := uc.orderRepo.FindByID(ctx, orderID)
+        order, err := uc.orderRepo.GetByID(ctx, orderID)
         if err != nil {
-            return err
-        }
-        if order == nil {
-            return domain.ErrOrderNotFound
+            return err  // includes domain.ErrOrderNotFound
         }
 
         // 2. Apply business logic (state transition)

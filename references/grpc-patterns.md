@@ -22,7 +22,7 @@ Domain Error (ErrorCode) → Interceptor (ErrorCode → codes.Code) → gRPC Sta
 
 | Layer | Handling |
 |-------|----------|
-| Domain | Define `DomainError` struct + `ErrorCode` enum (zero external deps) |
+| Domain | Define `Error` struct + `ErrorCode` enum (zero external deps) |
 | Application | Return Domain Error directly, no mapping |
 | Adapter (Interceptor) | Centrally map `ErrorCode` to gRPC Status |
 | Infrastructure | LoggingInterceptor logs full error chain (incl. Unwrap) |
@@ -41,10 +41,12 @@ type ErrorCode int
 
 const (
     ErrCodeNotFound           ErrorCode = iota // Resource not found
+    ErrCodeAlreadyExists                       // Resource already exists (duplicate creation)
     ErrCodeInvalidInput                        // Invalid input parameters
     ErrCodePreconditionFailed                  // Business precondition not met
     ErrCodeConflict                            // Concurrent conflict (optimistic lock)
-    ErrCodeAborted                             // Operation aborted
+    ErrCodeAborted                             // Operation aborted (e.g., saga rollback)
+    ErrCodeInternal                            // Unexpected internal error
 )
 
 // DomainError — any error implementing this interface gets auto-mapped by Interceptor
@@ -62,21 +64,25 @@ type ClientMessage interface {
 
 ### Domain Error Definition (per-service `internal/domain/`)
 
+Named `Error` (not `DomainError`) to avoid collision with `pkg/errors.DomainError` interface.
+
 ```go
-type DomainError struct {
+// internal/domain/errors.go
+type Error struct {
     code pkgerrors.ErrorCode
     msg  string
 }
-func (e *DomainError) Error() string                   { return e.msg }
-func (e *DomainError) DomainCode() pkgerrors.ErrorCode { return e.code }
-func (e *DomainError) ClientMsg() string               { return e.msg } // Business errors safe to expose
+func (e *Error) Error() string                   { return e.msg }
+func (e *Error) DomainCode() pkgerrors.ErrorCode { return e.code }
+func (e *Error) ClientMsg() string               { return e.msg } // Business errors safe to expose
 
 var (
-    ErrInvalidTransition   = &DomainError{pkgerrors.ErrCodePreconditionFailed, "invalid status transition"}
-    ErrOrderNotFound       = &DomainError{pkgerrors.ErrCodeNotFound, "order not found"}
-    ErrInsufficientBalance = &DomainError{pkgerrors.ErrCodePreconditionFailed, "insufficient balance"}
-    ErrCurrencyMismatch    = &DomainError{pkgerrors.ErrCodeInvalidInput, "currency mismatch"}
-    ErrOptimisticLock      = &DomainError{pkgerrors.ErrCodeConflict, "concurrent modification detected"}
+    ErrInvalidTransition   = &Error{pkgerrors.ErrCodePreconditionFailed, "invalid status transition"}
+    ErrOrderNotFound       = &Error{pkgerrors.ErrCodeNotFound, "order not found"}
+    ErrOrderAlreadyExists  = &Error{pkgerrors.ErrCodeAlreadyExists, "order already exists"}
+    ErrInsufficientBalance = &Error{pkgerrors.ErrCodePreconditionFailed, "insufficient balance"}
+    ErrCurrencyMismatch    = &Error{pkgerrors.ErrCodeInvalidInput, "currency mismatch"}
+    ErrOptimisticLock      = &Error{pkgerrors.ErrCodeConflict, "concurrent modification detected"}
 )
 ```
 
@@ -88,6 +94,7 @@ var (
 // pkg/errors/wrap.go
 import (
     "fmt"
+    "path/filepath"
     "runtime"
 
     "github.com/pkg/errors"
@@ -138,10 +145,12 @@ func (s *userService) GetByID(ctx context.Context, id int64) (*entity.User, erro
 // pkg/middleware/grpc/interceptor/error_mapping.go
 var domainCodeToGRPC = map[pkgerrors.ErrorCode]codes.Code{
     pkgerrors.ErrCodeNotFound:           codes.NotFound,
+    pkgerrors.ErrCodeAlreadyExists:      codes.AlreadyExists,
     pkgerrors.ErrCodeInvalidInput:       codes.InvalidArgument,
     pkgerrors.ErrCodePreconditionFailed: codes.FailedPrecondition,
     pkgerrors.ErrCodeConflict:           codes.Aborted,
     pkgerrors.ErrCodeAborted:            codes.Aborted,
+    pkgerrors.ErrCodeInternal:           codes.Internal,
 }
 
 func ErrorMappingInterceptor() grpc.UnaryServerInterceptor {
@@ -199,12 +208,52 @@ Order matters — outermost executes first on request, last on response:
 grpc.ChainUnaryInterceptor(
     otelgrpc.UnaryServerInterceptor(),          // 1. OTel tracing (outermost)
     interceptor.ServerCorrelationInterceptor(),  // 2. correlation_id / request_id
-    interceptor.LoggingInterceptor(logger),      // 3. Request logging
+    interceptor.LoggingInterceptor(logger),      // 3. Request logging (logs unauthenticated attempts too)
     interceptor.RecoveryInterceptor(logger),     // 4. Panic recovery
     interceptor.MetricsInterceptor(metrics),     // 5. Prometheus metrics
-    interceptor.RateLimitInterceptor(limiter),   // 6. Server-side rate limiting
-    interceptor.ErrorMappingInterceptor(),       // 7. Error mapping (innermost)
+    interceptor.RateLimitInterceptor(limiter),   // 6. Rate limiting (before auth to reject floods early)
+    interceptor.AuthInterceptor(jwtValidator),   // 7. Authentication (after rate limit)
+    interceptor.ErrorMappingInterceptor(),       // 8. Error mapping (innermost)
 )
+```
+
+### RateLimitInterceptor Implementation
+
+Server-side rate limiting per method to protect against traffic floods:
+
+```go
+// pkg/middleware/grpc/interceptor/rate_limit.go
+type RateLimiter struct {
+    limiters map[string]*rate.Limiter  // per-method limiter
+    global   *rate.Limiter             // global fallback
+}
+
+func NewRateLimiter(globalRPS float64, globalBurst int) *RateLimiter {
+    return &RateLimiter{
+        limiters: make(map[string]*rate.Limiter),
+        global:   rate.NewLimiter(rate.Limit(globalRPS), globalBurst),
+    }
+}
+
+// WithMethodLimit sets a per-method rate limit
+func (rl *RateLimiter) WithMethodLimit(method string, rps float64, burst int) *RateLimiter {
+    rl.limiters[method] = rate.NewLimiter(rate.Limit(rps), burst)
+    return rl
+}
+
+func RateLimitInterceptor(rl *RateLimiter) grpc.UnaryServerInterceptor {
+    return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo,
+        handler grpc.UnaryHandler) (interface{}, error) {
+        limiter := rl.global
+        if ml, ok := rl.limiters[info.FullMethod]; ok {
+            limiter = ml
+        }
+        if !limiter.Allow() {
+            return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded")
+        }
+        return handler(ctx, req)
+    }
+}
 ```
 
 ## Tracing Protocol
@@ -595,30 +644,25 @@ func UserRolesFrom(ctx context.Context) []string {
 // pkg/ctxutil/generic.go
 package ctxutil
 
-import (
-    "context"
-    "reflect"
-)
+import "context"
 
-const keyPrefix = "_ctx:"
+// typedKey uses Go's type system as the context key.
+// Different T types produce different key types → no collisions, no reflection.
+type typedKey[T any] struct{}
 
 // Get 從 context 取得指定類型的值
 func Get[T any](ctx context.Context) (T, bool) {
-    var zero T
-    key := reflect.TypeOf(zero).String() + keyPrefix
-    v := ctx.Value(key)
-    if v == nil {
-        return zero, false
-    }
-    return v.(T), true
+    v, ok := ctx.Value(typedKey[T]{}).(T)
+    return v, ok
 }
 
 // Set 在 context 中設定指定類型的值
 func Set[T any](ctx context.Context, val T) context.Context {
-    key := reflect.TypeOf(val).String() + keyPrefix
-    return context.WithValue(ctx, key, val)
+    return context.WithValue(ctx, typedKey[T]{}, val)
 }
 ```
+
+**Why `typedKey[T]` instead of `reflect.TypeOf`**: The reflect-based approach panics when `T` is an interface type (zero value of interface → `reflect.TypeOf` returns nil). Using a generic struct key leverages Go's type system directly — each concrete `T` produces a unique key type at compile time, with zero runtime cost and no reflection.
 
 **Usage**:
 ```go
@@ -842,21 +886,6 @@ func AuthPropagationInterceptor() grpc.UnaryClientInterceptor {
 | User context helpers | `pkg/ctxutil/` | Shared |
 | Auth propagation (client) | `pkg/middleware/grpc/interceptor/` | Shared |
 | Role-based access control | UseCase or dedicated Interceptor | Application |
-
-### Interceptor Chain Order (Updated)
-
-```go
-grpc.ChainUnaryInterceptor(
-    otelgrpc.UnaryServerInterceptor(),          // 1. OTel tracing
-    interceptor.ServerCorrelationInterceptor(),  // 2. correlation_id
-    interceptor.LoggingInterceptor(logger),      // 3. Request logging (logs unauthenticated attempts too)
-    interceptor.RecoveryInterceptor(logger),     // 4. Panic recovery
-    interceptor.MetricsInterceptor(metrics),     // 5. Prometheus metrics
-    interceptor.RateLimitInterceptor(limiter),   // 6. Rate limiting (before auth to reject floods early)
-    interceptor.AuthInterceptor(jwtValidator),   // 7. Authentication (after rate limit)
-    interceptor.ErrorMappingInterceptor(),       // 8. Error mapping (innermost)
-)
-```
 
 ---
 

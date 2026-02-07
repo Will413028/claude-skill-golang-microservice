@@ -234,6 +234,7 @@ Per-IP + Per-Path rate limiting for HTTP Gateway. Uses `golang.org/x/time/rate` 
 package middleware
 
 import (
+    "context"
     "net/http"
     "sync"
     "time"
@@ -247,44 +248,58 @@ type limiterKey struct {
     Path string
 }
 
+type limiterEntry struct {
+    limiter  *rate.Limiter
+    lastSeen time.Time
+}
+
 type rateLimiterStore struct {
-    limiters map[limiterKey]*rate.Limiter
-    mu       sync.Mutex
+    entries map[limiterKey]*limiterEntry
+    mu      sync.Mutex
 }
 
 // NewIPPathRateLimiter creates a rate limiter per IP+Path combination
 // interval: minimum time between requests (e.g., 100ms = 10 req/sec)
 // burst: max burst size
-func NewIPPathRateLimiter(interval time.Duration, burst int) gin.HandlerFunc {
+// ctx: used to stop the cleanup goroutine on shutdown
+func NewIPPathRateLimiter(ctx context.Context, interval time.Duration, burst int) gin.HandlerFunc {
     store := &rateLimiterStore{
-        limiters: make(map[limiterKey]*rate.Limiter),
+        entries: make(map[limiterKey]*limiterEntry),
     }
 
     getLimiter := func(ip, path string) *rate.Limiter {
         key := limiterKey{IP: ip, Path: path}
         store.mu.Lock()
         defer store.mu.Unlock()
-        if l, exists := store.limiters[key]; exists {
-            return l
+        if e, exists := store.entries[key]; exists {
+            e.lastSeen = time.Now()
+            return e.limiter
         }
         l := rate.NewLimiter(rate.Every(interval), burst)
-        store.limiters[key] = l
+        store.entries[key] = &limiterEntry{limiter: l, lastSeen: time.Now()}
         return l
     }
 
     // Cleanup goroutine: remove stale limiters every 5 minutes
+    // Stops when ctx is cancelled (graceful shutdown)
     go func() {
+        const staleThreshold = 10 * time.Minute
         ticker := time.NewTicker(5 * time.Minute)
         defer ticker.Stop()
-        for range ticker.C {
-            store.mu.Lock()
-            for k, l := range store.limiters {
-                // If limiter can allow a request, it's been idle → delete
-                if l.AllowN(time.Now(), 1) {
-                    delete(store.limiters, k)
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                now := time.Now()
+                store.mu.Lock()
+                for k, e := range store.entries {
+                    if now.Sub(e.lastSeen) > staleThreshold {
+                        delete(store.entries, k)
+                    }
                 }
+                store.mu.Unlock()
             }
-            store.mu.Unlock()
         }
     }()
 
@@ -308,12 +323,14 @@ func NewIPPathRateLimiter(interval time.Duration, burst int) gin.HandlerFunc {
 ### Usage
 
 ```go
+// ctx is typically the application lifecycle context (cancelled on shutdown)
+
 // Apply globally
-r.Use(middleware.NewIPPathRateLimiter(100*time.Millisecond, 10))  // 10 req/sec, burst 10
+r.Use(middleware.NewIPPathRateLimiter(ctx, 100*time.Millisecond, 10))  // 10 req/sec, burst 10
 
 // Apply to specific routes
 sensitiveGroup := r.Group("/api/v1/auth")
-sensitiveGroup.Use(middleware.NewIPPathRateLimiter(time.Second, 5))  // 1 req/sec, burst 5
+sensitiveGroup.Use(middleware.NewIPPathRateLimiter(ctx, time.Second, 5))  // 1 req/sec, burst 5
 sensitiveGroup.POST("/login", authController.Login)
 sensitiveGroup.POST("/reset-password", authController.ResetPassword)
 ```
@@ -324,7 +341,8 @@ sensitiveGroup.POST("/reset-password", authController.ResetPassword)
 |----------|-----------|
 | **IP + Path key** | Same IP can access different endpoints at different rates |
 | **`c.FullPath()` not `c.Request.URL.Path`** | Use route pattern `/users/:id` not `/users/123` — prevents per-resource explosion |
-| **Cleanup goroutine** | Prevent memory leak from accumulating stale entries |
+| **`lastSeen` tracking** | Track last access time instead of consuming tokens for cleanup. Prevents false positives and token loss |
+| **`context.Context` for shutdown** | Cleanup goroutine stops when ctx is cancelled, preventing goroutine leak |
 | **Token bucket** | Allows bursts while enforcing long-term rate |
 
 ### When to Use

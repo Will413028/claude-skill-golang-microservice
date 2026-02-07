@@ -489,7 +489,7 @@ import (
     "go.opentelemetry.io/otel/propagation"
     "go.opentelemetry.io/otel/sdk/resource"
     sdktrace "go.opentelemetry.io/otel/sdk/trace"
-    semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+    semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
     "google.golang.org/grpc"
     "google.golang.org/grpc/credentials/insecure"
 )
@@ -523,7 +523,7 @@ func Init(ctx context.Context, cfg Config) (func(), error) {
             semconv.SchemaURL,
             semconv.ServiceName(cfg.ServiceName),
             semconv.ServiceVersion(cfg.ServiceVersion),
-            semconv.DeploymentEnvironment(cfg.Environment),
+            semconv.DeploymentEnvironmentName(cfg.Environment),
         ),
     )
     if err != nil {

@@ -184,29 +184,39 @@ func (u *checkoutUseCase) Execute(ctx context.Context, req *request.Checkout) (*
 
 ### Fx Module Wiring
 
+Uses per-package `di.go` pattern (see [Uber Fx Dependency Injection](#uber-fx-dependency-injection) for details):
+
 ```go
-// infrastructure/fx/service_module.go
-var ServiceModule = fx.Options(
-    fx.Provide(service.NewAddressService),
-    fx.Provide(service.NewPointsService),
-    fx.Provide(service.NewAccountService),
-)
+// application/service/di.go
+package service
 
-// infrastructure/fx/usecase_module.go
-var UseCaseModule = fx.Options(
-    fx.Provide(usecase.NewCheckoutUseCase),
-    fx.Provide(usecase.NewGoogleOAuthUseCase),
-    fx.Provide(usecase.NewCertificationUseCase),
-)
+func Module() fx.Option {
+    return fx.Options(
+        fx.Provide(newAddressService),
+        fx.Provide(newPointsService),
+        fx.Provide(newAccountService),
+    )
+}
 
-// infrastructure/fx/module.go
+// application/usecase/checkoutuc/di.go
+package checkoutuc
+
+func Module() fx.Option {
+    return fx.Options(
+        fx.Provide(newCheckoutUseCase),
+    )
+}
+
+// infrastructure/fx/module.go — Root Module composes all sub-modules
 var Module = fx.Options(
     ConfigModule,
     DatabaseModule,
-    RepositoryModule,
-    ServiceModule,      // Service 先於 UseCase
-    UseCaseModule,
-    GRPCModule,
+    persistence.Module(),
+    service.Module(),
+    checkoutuc.Module(),
+    oauthuc.Module(),
+    certuc.Module(),
+    grpchandler.Module(),
 )
 ```
 
@@ -360,7 +370,7 @@ project-root/
 
 | Operation | Convention | Return |
 |-----------|-----------|--------|
-| Single lookup | `GetByID`, `GetBy<Field>` | `(*Entity, error)` — returns `nil, nil` if not found |
+| Single lookup | `GetByID`, `GetBy<Field>` | `(*Entity, error)` — returns `nil, domain.ErrXxxNotFound` if not found |
 | List with filter | `List<Criteria>` | `([]*Entity, error)` |
 | Count | `Count<Criteria>` | `(int64, error)` |
 | Create | `Create` | `error` (ID populated on entity) |
@@ -465,23 +475,9 @@ var Module = fx.Options(
 )
 ```
 
-### Wiring Pattern
+### Infrastructure Modules (`infrastructure/fx/`)
 
-```go
-// internal/infrastructure/fx/module.go
-var Module = fx.Options(
-    ConfigModule,
-    DatabaseModule,
-    ObservabilityModule,
-    RepositoryModule,
-    ClientModule,
-    UseCaseModule,
-    GRPCModule,
-    // Async stage additions:
-    // MQModule,
-    // PollerModule,
-)
-```
+Infrastructure modules (Database, gRPC server) stay in `infrastructure/fx/` — they are not per-package:
 
 ```go
 // internal/infrastructure/fx/database_module.go
@@ -496,48 +492,23 @@ var DatabaseModule = fx.Options(
 ```
 
 ```go
-// internal/infrastructure/fx/repository_module.go
-var RepositoryModule = fx.Options(
-    // fx.As binds concrete impl to Domain interface (dependency inversion)
-    fx.Provide(fx.Annotate(
-        postgres.NewOrderRepository,
-        fx.As(new(repository.OrderRepository)),
-    )),
-    fx.Provide(fx.Annotate(
-        postgres.NewOutboxRepository,
-        fx.As(new(repository.OutboxRepository)),
-    )),
-)
-```
-
-```go
-// internal/infrastructure/fx/usecase_module.go
-var UseCaseModule = fx.Options(
-    // Fx auto-resolves constructor params from provided types
-    fx.Provide(fx.Annotate(
-        usecase.NewCreateOrderUseCase,
-        fx.As(new(input.CreateOrderUseCase)),
-    )),
-)
-```
-
-```go
 // internal/infrastructure/fx/grpc_module.go
 var GRPCModule = fx.Options(
     fx.Provide(NewGRPCServer),
     fx.Invoke(RegisterGRPCServices),  // Invoke: side-effect only (register handlers)
 )
 
-func NewGRPCServer(logger *zap.Logger, metrics *prometheus.Registry) *grpc.Server {
+func NewGRPCServer(logger *zap.Logger, metrics *prometheus.Registry, jwtValidator *jwt.Validator, limiter *ratelimit.Limiter) *grpc.Server {
     return grpc.NewServer(
         grpc.ChainUnaryInterceptor(
-            otelgrpc.UnaryServerInterceptor(),
-            interceptor.ServerCorrelationInterceptor(),
-            interceptor.LoggingInterceptor(logger),
-            interceptor.RecoveryInterceptor(logger),
-            interceptor.MetricsInterceptor(metrics),
-            interceptor.AuthInterceptor(jwtValidator),   // See grpc-patterns.md Auth section
-            interceptor.ErrorMappingInterceptor(),
+            otelgrpc.UnaryServerInterceptor(),          // 1. OTel tracing
+            interceptor.ServerCorrelationInterceptor(),  // 2. correlation_id
+            interceptor.LoggingInterceptor(logger),      // 3. Request logging
+            interceptor.RecoveryInterceptor(logger),     // 4. Panic recovery
+            interceptor.MetricsInterceptor(metrics),     // 5. Prometheus metrics
+            interceptor.RateLimitInterceptor(limiter),   // 6. Rate limiting
+            interceptor.AuthInterceptor(jwtValidator),   // 7. Authentication
+            interceptor.ErrorMappingInterceptor(),       // 8. Error mapping
         ),
     )
 }
@@ -685,7 +656,7 @@ message ListOrdersRequest {
 # docker-compose.yml
 services:
   postgres:
-    image: postgres:18-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -798,7 +769,7 @@ generate:
 	@for dir in services/*/; do \
 		if [ -f "$$dir/db/sqlc.yaml" ]; then \
 			echo "sqlc generate $$(basename $$dir)..."; \
-			cd $$dir/db && sqlc generate && cd ../../..; \
+			(cd $$dir/db && sqlc generate); \
 		fi; \
 	done
 

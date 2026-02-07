@@ -251,7 +251,9 @@ func RegisterRoutes(r *gin.RouterGroup, ctrl *Controller, authMiddleware gin.Han
 
 ## Distributed Lock (Prevent Duplicate Execution)
 
-When running multiple instances (K8s replicas), use **Redis distributed lock** to ensure only one instance executes a job:
+When running multiple instances (K8s replicas), use **Redis distributed lock** to ensure only one instance executes a job.
+
+> **Note**: This uses a simple `SetNX` + TTL pattern (fire-and-forget). For long-running business operations needing auto-renewal (WatchDog), use the **redsync-based Locker** from [resilience.md](resilience.md#distributed-lock-redlock). The simpler approach suffices here because: (1) job lock TTL is much longer than job duration, (2) we intentionally let TTL expire to prevent re-execution within the window, (3) no unlock needed.
 
 ```go
 // pkg/redislock/lock.go
@@ -577,15 +579,16 @@ groups:
           summary: "Job {{ $labels.job_name }} running for over 30 minutes"
 
       # Job not executed (missed schedule)
+      # Uses timestamp() of the last counter increment to detect staleness
       - alert: JobMissedSchedule
         expr: |
-          time() - max(job_execution_total{job_name="StatsContentHourly"}) by (job_name) > 7200
+          time() - max(timestamp(job_execution_total{job_name="StatsContentHourly",status="completed"})) by (job_name) > 7200
         for: 5m
         labels:
           severity: critical
         annotations:
           summary: "Job {{ $labels.job_name }} missed scheduled execution"
-          description: "No execution in the last 2 hours"
+          description: "No successful execution in the last 2 hours"
 
       # Job duration anomaly
       - alert: JobDurationAnomaly

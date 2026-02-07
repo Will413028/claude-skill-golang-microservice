@@ -367,7 +367,7 @@ func New(opts ...Option) *group {
 }
 
 func (g *group) Go(f func() error) {
-    g.Group.Go(func() error {
+    g.Group.Go(func() (err error) {
         defer func() {
             if r := recover(); r != nil {
                 zap.L().Error("goroutine panic",
@@ -377,6 +377,8 @@ func (g *group) Go(f func() error) {
                 if g.panicCallback != nil {
                     g.panicCallback(r)
                 }
+                // Return error so Wait() reports the panic to caller
+                err = fmt.Errorf("panic recovered: %v", r)
             }
         }()
         return f()
@@ -569,10 +571,11 @@ import "context"
 
 type LockService interface {
     // WithLock executes fn while holding the lock, auto-unlock on return
-    WithLock(ctx context.Context, key string, fn func() error) error
+    // fn receives enriched context for re-entrancy detection in nested calls
+    WithLock(ctx context.Context, key string, fn func(ctx context.Context) error) error
 
     // WithUserTransaction locks user's financial operations
-    WithUserTransaction(ctx context.Context, userID string, fn func() error) error
+    WithUserTransaction(ctx context.Context, userID string, fn func(ctx context.Context) error) error
 }
 ```
 
@@ -597,17 +600,17 @@ func NewLockService(locker *redislock.Locker) output.LockService {
     return &lockService{locker: locker}
 }
 
-func (s *lockService) WithLock(ctx context.Context, key string, fn func() error) error {
+func (s *lockService) WithLock(ctx context.Context, key string, fn func(ctx context.Context) error) error {
     mx := s.locker.NewMutex(ctx, key)
     if err := mx.Lock(); err != nil {
         return fmt.Errorf("acquire lock: %w", err)
     }
     defer mx.Unlock()
 
-    return fn()
+    return fn(ctx)
 }
 
-func (s *lockService) WithUserTransaction(ctx context.Context, userID string, fn func() error) error {
+func (s *lockService) WithUserTransaction(ctx context.Context, userID string, fn func(ctx context.Context) error) error {
     return s.WithLock(ctx, fmt.Sprintf("lock:transaction:user:%s", userID), fn)
 }
 ```
@@ -616,7 +619,7 @@ func (s *lockService) WithUserTransaction(ctx context.Context, userID string, fn
 
 ```go
 func (uc *TransferUseCase) Transfer(ctx context.Context, req TransferRequest) error {
-    return uc.lockService.WithUserTransaction(ctx, req.FromUserID, func() error {
+    return uc.lockService.WithUserTransaction(ctx, req.FromUserID, func(ctx context.Context) error {
         // Critical section: deduct from sender
         if err := uc.walletRepo.Deduct(ctx, req.FromUserID, req.Amount); err != nil {
             return err
@@ -644,18 +647,21 @@ func IsLocked(ctx context.Context, key string) bool {
 }
 
 func MarkLocked(ctx context.Context, key string) context.Context {
-    keys, ok := ctx.Value(lockedKeysKey{}).(map[string]struct{})
-    if !ok {
-        keys = make(map[string]struct{})
+    // Always create a new map (copy-on-write) to avoid mutating shared map across goroutines
+    oldKeys, _ := ctx.Value(lockedKeysKey{}).(map[string]struct{})
+    newKeys := make(map[string]struct{}, len(oldKeys)+1)
+    for k, v := range oldKeys {
+        newKeys[k] = v
     }
-    keys[key] = struct{}{}
-    return context.WithValue(ctx, lockedKeysKey{}, keys)
+    newKeys[key] = struct{}{}
+    return context.WithValue(ctx, lockedKeysKey{}, newKeys)
 }
 
 // WithLock with re-entrancy check
-func (s *lockService) WithLock(ctx context.Context, key string, fn func() error) error {
+// fn receives enriched context so nested WithLock calls can detect the held lock
+func (s *lockService) WithLock(ctx context.Context, key string, fn func(ctx context.Context) error) error {
     if IsLocked(ctx, key) {
-        return fn()  // Already holding lock, skip acquire
+        return fn(ctx)  // Already holding lock, skip acquire
     }
 
     mx := s.locker.NewMutex(ctx, key)
@@ -665,7 +671,7 @@ func (s *lockService) WithLock(ctx context.Context, key string, fn func() error)
     defer mx.Unlock()
 
     ctx = MarkLocked(ctx, key)
-    return fn()
+    return fn(ctx)
 }
 ```
 
@@ -678,6 +684,7 @@ func (s *lockService) WithLock(ctx context.Context, key string, fn func() error)
 | Rate limiting per user | ❌ No | Use Redis counter instead |
 | Idempotency check | ❌ No | Use SET NX with TTL |
 | Saga step execution | ✅ Consider | Prevent concurrent saga on same entity |
+| Cron job deduplication | ❌ Use simpler SetNX | See [scheduled-jobs.md](scheduled-jobs.md#distributed-lock-prevent-duplicate-execution) |
 
 ### Design Decisions
 
