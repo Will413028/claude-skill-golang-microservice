@@ -299,6 +299,54 @@ SELECT * FROM orders WHERE id = $1 FOR UPDATE;
 
 Must be used within a TX (`TxManager.WithTx`). Holds row lock until TX commits/rolls back. Prefer optimistic locking as default; use pessimistic only for high-contention critical sections.
 
+### Optimistic Lock Retry Pattern
+
+When optimistic lock conflicts occur, UseCase should reload entity and retry:
+
+```go
+// internal/application/usecase/confirm_order.go
+func (uc *ConfirmOrderUseCase) Execute(ctx context.Context, orderID uuid.UUID) error {
+    const maxRetries = 3
+    var lastErr error
+
+    for attempt := 0; attempt < maxRetries; attempt++ {
+        // 1. Always reload fresh entity from DB
+        order, err := uc.orderRepo.FindByID(ctx, orderID)
+        if err != nil {
+            return err
+        }
+        if order == nil {
+            return domain.ErrOrderNotFound
+        }
+
+        // 2. Apply business logic (state transition)
+        if err := order.Confirm(time.Now()); err != nil {
+            return err  // Business rule error — no retry
+        }
+
+        // 3. Attempt to persist with optimistic lock
+        if err := uc.orderRepo.Update(ctx, order); err != nil {
+            if errors.Is(err, domain.ErrOptimisticLock) {
+                lastErr = err
+                continue  // Retry: reload and try again
+            }
+            return err  // Other DB error — no retry
+        }
+
+        return nil  // Success
+    }
+
+    return fmt.Errorf("optimistic lock conflict after %d retries: %w", maxRetries, lastErr)
+}
+```
+
+**Key points**:
+
+- Always reload entity before each retry (stale data causes repeated conflicts)
+- Only retry on `ErrOptimisticLock`, not on business rule errors
+- Limit retries to prevent infinite loops under high contention
+- Consider pessimistic locking if retry rate > 5%
+
 ## Domain Event
 
 Domain Events are collected by Entity during state transitions. UseCase extracts them and writes to Outbox.

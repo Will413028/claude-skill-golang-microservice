@@ -534,6 +534,11 @@ func (m *Mutex) Unlock() error {
 }
 
 // watchDog auto-renews lock every expiry/2 to prevent timeout
+//
+// ⚠️ IMPORTANT: If ExtendContext fails (Redis unavailable), context is cancelled
+// but business logic may still be running. The lock will eventually expire,
+// allowing other nodes to acquire it. Business logic MUST check ctx.Done()
+// periodically and abort if cancelled to prevent concurrent execution.
 func (m *Mutex) watchDog() {
     ticker := time.NewTicker(m.expiry / 2)
     defer ticker.Stop()
@@ -544,6 +549,8 @@ func (m *Mutex) watchDog() {
             return
         case <-ticker.C:
             if _, err := m.mx.ExtendContext(m.ctx); err != nil {
+                // Extension failed — cancel context to signal business logic
+                // Business logic should check ctx.Done() and abort gracefully
                 m.cancel()
                 return
             }

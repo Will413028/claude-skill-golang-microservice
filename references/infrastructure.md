@@ -188,12 +188,22 @@ func (c *Consumer) consume(queue string, handler MessageHandler) {
             if !ok {
                 return
             }
-            if err := handler.Handle(context.Background(), msg); err != nil {
-                msg.Nack(false, !isPermanentError(err))
-            } else {
-                msg.Ack(false)
-            }
+            c.handleMessage(queue, msg, handler)
         }
+    }
+}
+
+func (c *Consumer) handleMessage(queue string, msg amqp.Delivery, handler MessageHandler) {
+    // Create timeout context for message processing
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    if err := handler.Handle(ctx, msg); err != nil {
+        zap.L().Error("message processing failed",
+            zap.String("queue", queue), zap.Error(err))
+        msg.Nack(false, !isPermanentError(err))
+    } else {
+        msg.Ack(false)
     }
 }
 ```
