@@ -4,7 +4,7 @@ Covers MQ consumer patterns, Saga orchestration, and Outbox pattern for reliable
 
 ## Table of Contents
 
-- [MQ Consumer Patterns](#mq-consumer-patterns)
+- [MQ Consumer Patterns `[Async]`](#mq-consumer-patterns-async)
   - [Consumer Architecture](#consumer-architecture)
   - [Message Processing Pattern](#message-processing-pattern)
   - [Ack/Nack Decision Table](#acknack-decision-table)
@@ -15,13 +15,13 @@ Covers MQ consumer patterns, Saga orchestration, and Outbox pattern for reliable
 - [Synchronous Saga (MVP Stage)](#synchronous-saga-mvp-stage)
   - [Saga Execution Record Schema](#saga-execution-record-schema)
 - [Stale Record Scanner](#stale-record-scanner)
-- [Asynchronous Saga + Outbox (Async Stage)](#asynchronous-saga--outbox-async-stage)
-- [Two-Phase Outbox Poller](#two-phase-outbox-poller)
-- [TxManager](#txmanager)
-- [Saga Timeout Monitor](#saga-timeout-monitor)
+- [Asynchronous Saga + Outbox `[Async]`](#asynchronous-saga--outbox-async)
+- [Two-Phase Outbox Poller `[Async]`](#two-phase-outbox-poller-async)
+- [TxManager `[Async]`](#txmanager-async)
+- [Saga Timeout Monitor `[Async]`](#saga-timeout-monitor-async)
 - [Repository Interface Segregation](#repository-interface-segregation)
 
-## MQ Consumer Patterns
+## MQ Consumer Patterns `[Async]`
 
 ### Consumer Architecture
 
@@ -182,7 +182,7 @@ func (uc *HandleOrderEventUseCase) Handle(ctx context.Context, eventType string,
 
 ### Consumer Graceful Shutdown
 
-Consumer shutdown must be coordinated with the overall shutdown sequence (see [Graceful Shutdown](infrastructure.md#graceful-shutdown)):
+Consumer shutdown must be coordinated with the overall shutdown sequence (see [Graceful Shutdown](infrastructure.md#graceful-shutdown-hardening)):
 
 ```go
 func (c *OrderEventConsumer) Stop() error {
@@ -466,7 +466,7 @@ func (s *StaleRecordScanner) scanAndRecover(ctx context.Context) {
 }
 ```
 
-## Asynchronous Saga + Outbox (Async Stage)
+## Asynchronous Saga + Outbox `[Async]`
 
 Single TX writes business record + Saga state + Outbox events (atomicity). Returns PENDING immediately.
 Events are collected from Entity (not manually constructed), ensuring state change and event consistency:
@@ -500,7 +500,7 @@ func (uc *UseCase) Execute(ctx context.Context, req *Request) (*Response, error)
 }
 ```
 
-## Two-Phase Outbox Poller
+## Two-Phase Outbox Poller `[Async]`
 
 **Design principle**: Separate "claim events" (short TX) from "publish + update status" (outside TX). Prevents long transactions from holding DB connections and row locks.
 
@@ -606,7 +606,7 @@ func (p *OutboxPoller) recoverStuckEvents(ctx context.Context) {
 | Commit failure + already published | Message sent but DB not updated — inconsistent | N/A — publish is outside TX |
 | Crash recovery | Cannot distinguish "processing" vs "unprocessed" | `picked_at` timeout → `UnpickStuckEvents` resets |
 
-## TxManager
+## TxManager `[Async]`
 
 Interface defined in Application Port. Implementation in Infrastructure (dependency inversion).
 
@@ -678,7 +678,7 @@ func (m *PgxTxManager) WithTx(ctx context.Context, fn func(txCtx context.Context
 }
 ```
 
-## Saga Timeout Monitor
+## Saga Timeout Monitor `[Async]`
 
 ```go
 type SagaTimeoutMonitor struct {

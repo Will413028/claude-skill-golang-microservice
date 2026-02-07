@@ -6,7 +6,7 @@
 - [Output Ports (Dependency Inversion)](#output-ports-dependency-inversion)
 - [gRPC Interceptor Chain](#grpc-interceptor-chain)
 - [Tracing Protocol](#tracing-protocol)
-- [MQ Trace Context Propagation](#mq-trace-context-propagation)
+- [MQ Trace Context Propagation `[Async]`](#mq-trace-context-propagation-async)
 - [API Pagination](#api-pagination)
 - [DTO Mapping](#dto-mapping)
 - [Context Deadline / Timeout Budget](#context-deadline--timeout-budget)
@@ -270,7 +270,7 @@ func RateLimitInterceptor(rl *RateLimiter) grpc.UnaryServerInterceptor {
 | `correlation_id` | Business correlation ID | Gateway generates UUIDv4 |
 | `request_id` | Single entry request ID | Gateway generates UUIDv4 |
 
-## MQ Trace Context Propagation
+## MQ Trace Context Propagation `[Async]`
 
 gRPC trace context is auto-propagated by OTel interceptor. MQ (RabbitMQ) requires manual injection/extraction, otherwise publisher → consumer trace chain breaks in Tempo.
 

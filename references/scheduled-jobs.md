@@ -253,7 +253,7 @@ func RegisterRoutes(r *gin.RouterGroup, ctrl *Controller, authMiddleware gin.Han
 
 When running multiple instances (K8s replicas), use **Redis distributed lock** to ensure only one instance executes a job.
 
-> **Note**: This uses a simple `SetNX` + TTL pattern (fire-and-forget). For long-running business operations needing auto-renewal (WatchDog), use the **redsync-based Locker** from [resilience.md](resilience.md#distributed-lock-redlock). The simpler approach suffices here because: (1) job lock TTL is much longer than job duration, (2) we intentionally let TTL expire to prevent re-execution within the window, (3) no unlock needed.
+> **Note**: This uses a simple `SetNX` + TTL pattern (fire-and-forget). For long-running business operations needing auto-renewal (WatchDog), use the **redsync-based Locker** from [resilience.md](resilience.md#distributed-lock-redlock-async). The simpler approach suffices here because: (1) job lock TTL is much longer than job duration, (2) we intentionally let TTL expire to prevent re-execution within the window, (3) no unlock needed.
 
 ```go
 // pkg/redislock/lock.go

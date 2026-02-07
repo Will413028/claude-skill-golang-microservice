@@ -13,7 +13,7 @@ Complete guide for implementing observability in Go microservices using **Grafan
 1. [Overview](#overview)
 2. [Logging (Zap + Loki)](#logging-zap--loki)
 3. [Tracing (OTel + Tempo)](#tracing-otel--tempo)
-4. [Metrics (Prometheus + Mimir)](#metrics-prometheus--mimir)
+4. [Metrics (Prometheus + Mimir) `[Async]`](#metrics-prometheus--mimir-async)
 5. [Correlation (Logs ↔ Traces ↔ Metrics)](#correlation-logs--traces--metrics)
 6. [Grafana Dashboards & Alerts](#grafana-dashboards--alerts)
 7. [Quick Reference](#quick-reference)
@@ -615,11 +615,11 @@ func Tracing(serviceName string) gin.HandlerFunc {
 }
 ```
 
-### MQ Trace Propagation
+### MQ Trace Propagation `[Async]`
 
-See [grpc-patterns.md — MQ Trace Context Propagation](grpc-patterns.md#mq-trace-context-propagation) for the canonical `AMQPCarrier` implementation (`pkg/mq/rabbitmq/trace.go`) and publisher/consumer usage examples.
+See [grpc-patterns.md — MQ Trace Context Propagation](grpc-patterns.md#mq-trace-context-propagation-async) for the canonical `AMQPCarrier` implementation (`pkg/mq/rabbitmq/trace.go`) and publisher/consumer usage examples.
 
-### Sampling Strategy
+### Sampling Strategy `[Hardening]`
 
 | Environment | Strategy | Rate | Rationale |
 |-------------|----------|------|-----------|
@@ -643,7 +643,7 @@ sampler := sdktrace.ParentBased(
 
 ---
 
-## Metrics (Prometheus + Mimir)
+## Metrics (Prometheus + Mimir) `[Async]`
 
 ### Metrics Types
 
@@ -865,7 +865,7 @@ log.Info("order created",
 )
 ```
 
-### Exemplars (Metrics → Traces)
+### Exemplars (Metrics → Traces) `[Async]`
 
 Link metrics to traces using exemplars:
 
@@ -919,7 +919,7 @@ func ObserveWithExemplar(ctx context.Context, hist *prometheus.HistogramVec, val
 
 ## Grafana Dashboards & Alerts
 
-### Service Overview Dashboard
+### Service Overview Dashboard `[Async]`
 
 ```json
 {
@@ -957,7 +957,7 @@ func ObserveWithExemplar(ctx context.Context, hist *prometheus.HistogramVec, val
 }
 ```
 
-### Alert Rules
+### Alert Rules `[Hardening]`
 
 ```yaml
 # prometheus/alerts/service_alerts.yml
@@ -1010,7 +1010,7 @@ groups:
           summary: "Many errors in {{ $labels.service }} logs"
 ```
 
-### Loki Alert Rules
+### Loki Alert Rules `[Hardening]`
 
 ```yaml
 # loki/alerts/log_alerts.yml
@@ -1057,7 +1057,7 @@ sum(count_over_time({service="order-service", level="error"}[1m]))
 {service=~".+"} |= "trace_id=abc123"
 ```
 
-### Metric Query Patterns (PromQL)
+### Metric Query Patterns (PromQL) `[Async]`
 
 ```promql
 # Request rate

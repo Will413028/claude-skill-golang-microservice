@@ -320,7 +320,7 @@ func (e OrderStatusChanged) Version() int      { return 1 }
 3. `entity.ClearEvents()` is called ONLY after TX commit succeeds
 4. If TX rolls back, events remain on Entity — no inconsistent state
 
-### Event Versioning Strategy
+### Event Versioning Strategy `[Async]`
 
 Every Domain Event carries a `Version()`. When event schema changes:
 

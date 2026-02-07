@@ -8,7 +8,7 @@
 - [Monorepo Structure](#monorepo-structure)
 - [Shared Packages (pkg)](#shared-packages-pkg)
 - [Naming Conventions](#naming-conventions)
-- [Monorepo Scaling Strategy](#monorepo-scaling-strategy)
+- [Monorepo Scaling Strategy `[Infrastructure]`](#monorepo-scaling-strategy-infrastructure)
 - [Uber Fx Dependency Injection](#uber-fx-dependency-injection)
 - [Proto / buf Tooling](#proto--buf-tooling)
 - [Local Development Environment](#local-development-environment)
@@ -377,7 +377,7 @@ application/port/output/             # Interface definition
 infrastructure/fx/external_module.go # Fx wiring
 ```
 
-## Monorepo Scaling Strategy
+## Monorepo Scaling Strategy `[Infrastructure]`
 
 Initially all services share a single `go.mod`. When service count exceeds 5–8, evaluate:
 

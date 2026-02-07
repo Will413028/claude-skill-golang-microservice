@@ -76,7 +76,7 @@ CREATE INDEX idx_orders_user_id ON orders (user_id);
 CREATE INDEX idx_orders_status ON orders (status);
 ```
 
-### Outbox Table Design
+### Outbox Table Design `[Async]`
 
 ```sql
 CREATE TABLE outbox_events (
@@ -121,6 +121,7 @@ WHERE id = $1 AND version = $3;
 -- name: GetOrderForUpdate :one
 SELECT * FROM orders WHERE id = $1 FOR UPDATE;
 
+-- `[Async]` Outbox Queries
 -- name: CreateOutboxEvent :one
 INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, event_version, payload)
 VALUES ($1, $2, $3, $4, $5) RETURNING *;
@@ -158,7 +159,7 @@ DELETE FROM outbox_events
 WHERE sent_at IS NOT NULL AND sent_at < $1;
 ```
 
-### Outbox Data Retention
+### Outbox Data Retention `[Async]`
 
 Sent events accumulate over time. Schedule periodic cleanup (recommended: 7-day retention):
 

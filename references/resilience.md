@@ -2,18 +2,18 @@
 
 ## Table of Contents
 
-- [Cache + singleflight](#cache--singleflight)
-- [Cache Invalidation Strategy](#cache-invalidation-strategy)
-- [Circuit Breaker + singleflight gRPC Client](#circuit-breaker--singleflight-grpc-client)
-- [Dispatcher Pattern](#dispatcher-pattern)
-- [Panic-Safe errgroup](#panic-safe-errgroup)
-- [Distributed Lock (Redlock)](#distributed-lock-redlock)
+- [Cache + singleflight `[Async]`](#cache--singleflight-async)
+- [Cache Invalidation Strategy `[Async]`](#cache-invalidation-strategy-async)
+- [Circuit Breaker + singleflight gRPC Client `[Async]`](#circuit-breaker--singleflight-grpc-client-async)
+- [Dispatcher Pattern `[Async]`](#dispatcher-pattern-async)
+- [Panic-Safe errgroup `[Async]`](#panic-safe-errgroup-async)
+- [Distributed Lock (Redlock) `[Async]`](#distributed-lock-redlock-async)
 - [Idempotency](#idempotency)
-- [Dead Letter Queue](#dead-letter-queue)
-- [gRPC Retry Policy](#grpc-retry-policy)
-- [Graceful Shutdown](#graceful-shutdown)
+- [Dead Letter Queue `[Hardening]`](#dead-letter-queue-hardening)
+- [gRPC Retry Policy `[Hardening]`](#grpc-retry-policy-hardening)
+- [Graceful Shutdown `[Hardening]`](#graceful-shutdown-hardening)
 
-## Cache + singleflight
+## Cache + singleflight `[Async]`
 
 ### Generic CacheLoader
 
@@ -94,7 +94,7 @@ type cacheResult[T any] struct {
 - Read/write ratio > 10:1 AND data tolerates short-term inconsistency → Introduce
 - Low read/write ratio OR strong consistency required → Skip
 
-### Cache Invalidation Strategy
+### Cache Invalidation Strategy `[Async]`
 
 Cache without invalidation leads to stale data. Choose the right strategy based on consistency requirements:
 
@@ -152,7 +152,7 @@ func (c *ProductCacheInvalidator) Handle(ctx context.Context, eventType string, 
 2. **Update cache instead of delete**: Two concurrent writes can race: Write A (old) updates cache after Write B (new) → stale. Delete is safe — next read fetches fresh.
 3. **No TTL as safety net**: Even with active invalidation, always set TTL. If invalidation message is lost (MQ failure, consumer bug), TTL prevents permanent staleness.
 
-## Circuit Breaker + singleflight gRPC Client
+## Circuit Breaker + singleflight gRPC Client `[Async]`
 
 ```go
 type SomeGRPCClient struct {
@@ -191,7 +191,7 @@ func (c *SomeGRPCClient) GetByIDs(ctx context.Context, ids []uuid.UUID) (Result,
 - Downstream not 100% available (cross-team, external API) → Introduce
 - Internal service within same team with SLA guarantees → Can defer
 
-## Dispatcher Pattern
+## Dispatcher Pattern `[Async]`
 
 Generic worker pool for parallel batch processing. Use when you need to process a collection of items concurrently with controlled parallelism.
 
@@ -330,7 +330,7 @@ func (uc *BatchProcessUseCase) ProcessOrders(ctx context.Context, orderIDs []str
 | Configurable worker count | Tune based on downstream capacity |
 | Round-robin default | Simple, even distribution |
 
-## Panic-Safe errgroup
+## Panic-Safe errgroup `[Async]`
 
 Standard `errgroup.Group` does not recover panics — a panic in one goroutine crashes the entire process. Wrap it with panic recovery for production safety.
 
@@ -425,7 +425,7 @@ func (uc *UseCase) ProcessConcurrently(ctx context.Context, items []Item) error 
 
 Use Dispatcher for batch processing (10+ items). Use gogroup for simple fan-out (2-5 concurrent calls).
 
-## Distributed Lock (Redlock)
+## Distributed Lock (Redlock) `[Async]`
 
 Use [redsync](https://github.com/go-redsync/redsync) for distributed locking across multiple service instances. Key feature: **WatchDog** auto-renewal to prevent lock timeout during long operations.
 
@@ -743,7 +743,7 @@ func (h *Handler) HandleEvent(ctx context.Context, eventID uuid.UUID, payload []
 }
 ```
 
-### Redis-based Idempotency Example
+### Redis-based Idempotency Example `[Async]`
 
 ```go
 func (h *Handler) HandleEvent(ctx context.Context, eventID string) error {
@@ -754,7 +754,7 @@ func (h *Handler) HandleEvent(ctx context.Context, eventID string) error {
 }
 ```
 
-## Dead Letter Queue
+## Dead Letter Queue `[Hardening]`
 
 ### RabbitMQ Configuration
 
@@ -781,7 +781,7 @@ func handleMessage(msg amqp.Delivery) {
 
 **Stage**: Hardening (must do). In MVP/Async stages, ensure consumers at minimum have error logging; DLQ can wait.
 
-## gRPC Retry Policy
+## gRPC Retry Policy `[Hardening]`
 
 ```go
 retryPolicy := `{
@@ -801,9 +801,9 @@ conn, _ := grpc.NewClient(address, grpc.WithDefaultServiceConfig(retryPolicy))
 
 **Stage**: Hardening. Only retry idempotent operations. Non-idempotent calls should NOT use automatic retries.
 
-## Graceful Shutdown
+## Graceful Shutdown `[Hardening]`
 
-See [infrastructure.md](infrastructure.md#graceful-shutdown) for complete graceful shutdown implementation including:
+See [infrastructure.md](infrastructure.md#graceful-shutdown-hardening) for complete graceful shutdown implementation including:
 
 - Shutdown sequence diagram
 - Fx Lifecycle hooks implementation

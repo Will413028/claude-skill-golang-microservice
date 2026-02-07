@@ -3,12 +3,12 @@
 ## Table of Contents
 
 - [Observability](#observability)
-- [Graceful Shutdown](#graceful-shutdown)
-- [Alert Rules](#alert-rules)
+- [Graceful Shutdown `[Hardening]`](#graceful-shutdown-hardening)
+- [Alert Rules `[Hardening]`](#alert-rules-hardening)
 - [Testing Strategy](#testing-strategy)
 - [CI/CD Pipeline](#cicd-pipeline)
-- [gRPC Health Check Service](#grpc-health-check-service)
-- [Kubernetes Deployment](#kubernetes-deployment)
+- [gRPC Health Check Service `[Hardening]`](#grpc-health-check-service-hardening)
+- [Kubernetes Deployment `[Infrastructure]`](#kubernetes-deployment-infrastructure)
 
 ## Observability
 
@@ -18,7 +18,7 @@ See [observability.md](observability.md) for complete observability implementati
 - Metrics (Prometheus + Mimir)
 - Grafana dashboards and alerts
 
-## Graceful Shutdown
+## Graceful Shutdown `[Hardening]`
 
 Proper shutdown order ensures no requests are dropped and all resources are cleaned up correctly.
 
@@ -266,7 +266,7 @@ func (p *Poller) poll() {
 3. **Force killing consumers** → Messages lost or redelivered
 4. **Not logging shutdown progress** → Hard to debug shutdown issues
 
-## Alert Rules
+## Alert Rules `[Hardening]`
 
 ```yaml
 groups:
@@ -594,7 +594,7 @@ stages:
 | Hardening | Add migration-safety checks |
 | Infrastructure | Full pipeline including deploy |
 
-## gRPC Health Check Service
+## gRPC Health Check Service `[Hardening]`
 
 K8s probes use `grpc: { port: 50051 }` which requires the standard `grpc.health.v1.Health` service to be registered.
 
@@ -673,7 +673,7 @@ time.Sleep(5 * time.Second)  // Wait for K8s endpoint removal (matches preStop)
 server.GracefulStop()
 ```
 
-## Kubernetes Deployment
+## Kubernetes Deployment `[Infrastructure]`
 
 ```yaml
 apiVersion: apps/v1
