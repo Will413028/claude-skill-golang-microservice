@@ -232,63 +232,9 @@ type OrderRepository interface {
 }
 ```
 
-### Repository Implementation Pattern (Adapter Layer)
+### Repository Implementation
 
-```go
-// internal/adapter/outbound/persistence/postgres/order_repository.go
-type OrderRepository struct {
-    pool *pgxpool.Pool
-}
-
-func (r *OrderRepository) Create(ctx context.Context, order *entity.Order) error {
-    q := sqlcgen.New(database.GetDBTX(ctx, r.pool))  // Dynamically uses TX or pool
-    row, err := q.CreateOrder(ctx, sqlcgen.CreateOrderParams{
-        UserID: order.UserID, Status: order.Status.String(),
-        Amount: order.TotalAmount.Amount, Currency: order.TotalAmount.Currency,
-    })
-    if err != nil { return err }
-    order.ID = row.ID
-    order.CreatedAt = row.CreatedAt
-    order.UpdatedAt = row.UpdatedAt
-    return nil
-}
-
-func (r *OrderRepository) GetByID(ctx context.Context, id uuid.UUID) (*entity.Order, error) {
-    q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
-    row, err := q.GetOrderByID(ctx, id)
-    if err != nil {
-        if errors.Is(err, pgx.ErrNoRows) {
-            return nil, domain.ErrOrderNotFound  // Map to Domain Error
-        }
-        return nil, err
-    }
-    return toDomainOrder(row)
-}
-
-func (r *OrderRepository) Update(ctx context.Context, order *entity.Order) error {
-    q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
-    result, err := q.UpdateOrderStatus(ctx, sqlcgen.UpdateOrderStatusParams{
-        ID: order.ID, Status: order.Status.String(), Version: int32(order.Version),
-    })
-    if err != nil { return err }
-    if result.RowsAffected() == 0 {
-        return domain.ErrOptimisticLock  // Optimistic lock conflict
-    }
-    order.Version++
-    return nil
-}
-
-// sqlcgen struct → Domain Entity (thin one-way mapping)
-func toDomainOrder(row *sqlcgen.Order) (*entity.Order, error) {
-    status, err := entity.OrderStatusString(row.Status)
-    if err != nil { return nil, fmt.Errorf("parse order status: %w", err) }
-    return &entity.Order{
-        ID: row.ID, UserID: row.UserID, Status: status,
-        TotalAmount: valueobject.Money{Amount: row.Amount, Currency: row.Currency},
-        Version: int(row.Version), CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
-    }, nil
-}
-```
+See [data-layer.md — Repository Implementation Pattern](data-layer.md#repository-implementation-pattern) for the canonical implementation with `sqlutil` helpers, complete import block, and `toEntity()` mapping.
 
 ### Pessimistic Locking (SELECT FOR UPDATE)
 

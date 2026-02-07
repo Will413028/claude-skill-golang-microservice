@@ -1,5 +1,8 @@
 # HTTP Gateway Patterns
 
+Patterns for a **standalone API Gateway** that translates REST → gRPC (Controller → gRPC Client, no UseCase).
+For **service-internal** REST endpoints with business logic (Handler → UseCase → Repository), see [rest-api.md](rest-api.md).
+
 ## Table of Contents
 
 - [Gateway Architecture](#gateway-architecture)

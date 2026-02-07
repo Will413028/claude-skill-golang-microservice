@@ -425,77 +425,177 @@ internal/
 │           └── payment_repository.go
 └── infrastructure/
     └── fx/
-        └── module.go              # Root: combines all sub-modules
+        ├── config_module.go       # ConfigModule
+        ├── logger_module.go       # LoggerModule
+        ├── database_module.go     # DatabaseModule + TxManager
+        ├── tracer_module.go       # TracerModule (OTel)
+        └── grpc_module.go         # GRPCModule + NewGRPCServer + Lifecycle
 ```
 
 ### Package-Level `di.go`
 
-Each package exposes a `Module()` function:
+Each package exposes a `Module()` function. See [Complete di.go Examples](#complete-digo-examples) for full code with `fx.Annotate` + `fx.As` interface binding.
+
+**Convention**:
+
+- Constructor 用大寫 (`NewXxx`) — 方便測試直接呼叫，di.go 內用 `fx.Annotate` 包裝綁定 interface
+- 新增 UseCase 只改該 package 的 `di.go`，減少 merge conflicts
+- Package 自包含，易於維護
+
+### Fx Key Rules
+
+| Concept | When to Use |
+|---------|-------------|
+| `fx.Provide` | Constructors that return types for others to depend on |
+| `fx.Invoke` | Side-effects (register handlers, start pollers) — runs at startup |
+| `fx.As(new(Interface))` | Bind concrete type to interface (dependency inversion at DI layer) |
+| `fx.Annotate` + `fx.ParamTags` | Disambiguate multiple implementations of the same interface |
+| `fx.Lifecycle` | Register `OnStart` / `OnStop` hooks (server listen, graceful shutdown) |
+
+### Complete `main.go` Example
+
+```go
+// cmd/order-service/main.go
+package main
+
+import (
+    "go.uber.org/fx"
+    "go.uber.org/zap"
+
+    grpchandler "github.com/yourproject/order-service/internal/adapter/inbound/grpc"
+    "github.com/yourproject/order-service/internal/adapter/outbound/persistence"
+    "github.com/yourproject/order-service/internal/application/usecase/orderuc"
+    infrafx "github.com/yourproject/order-service/internal/infrastructure/fx"
+)
+
+func main() {
+    fx.New(
+        // Infrastructure (config, database, gRPC server, logger, tracer)
+        infrafx.ConfigModule,
+        infrafx.LoggerModule,
+        infrafx.DatabaseModule,
+        infrafx.TracerModule,
+        infrafx.GRPCModule,
+
+        // Adapter — Outbound (repository implementations)
+        persistence.Module(),
+
+        // Application — UseCase
+        orderuc.Module(),
+
+        // Adapter — Inbound (gRPC handlers)
+        grpchandler.Module(),
+    ).Run()
+}
+```
+
+`fx.New().Run()` handles the full lifecycle: dependency injection → `OnStart` hooks → block on OS signal (SIGINT/SIGTERM) → `OnStop` hooks. No manual signal handling needed.
+
+### Complete `di.go` Examples
+
+**UseCase — Interface binding with `fx.As`**:
 
 ```go
 // internal/application/usecase/orderuc/di.go
 package orderuc
 
-import "go.uber.org/fx"
+import (
+    "go.uber.org/fx"
+    "github.com/yourproject/order-service/internal/application/port/input"
+)
 
 func Module() fx.Option {
     return fx.Options(
-        fx.Provide(newCreateOrderUseCase),  // lowercase: unexported constructor
-        fx.Provide(newCancelOrderUseCase),
+        fx.Provide(fx.Annotate(NewCreateOrderUseCase, fx.As(new(input.CreateOrderUseCase)))),
+        fx.Provide(fx.Annotate(NewGetOrderUseCase, fx.As(new(input.GetOrderUseCase)))),
+        fx.Provide(fx.Annotate(NewListOrdersUseCase, fx.As(new(input.ListOrdersUseCase)))),
+        fx.Provide(fx.Annotate(NewCancelOrderUseCase, fx.As(new(input.CancelOrderUseCase)))),
     )
 }
 ```
 
-**Benefits**:
-
-- Constructor 可以用小寫 (`newXxx`)，不需 export
-- 新增 UseCase 只改該 package 的 `di.go`，減少 merge conflicts
-- Package 自包含，易於維護
-
-### Root Module
-
-Infrastructure 的 `module.go` 組合所有 sub-modules：
+**Repository — Interface binding**:
 
 ```go
-// internal/infrastructure/fx/module.go
-var Module = fx.Options(
-    // Infrastructure
-    ConfigModule,
-    DatabaseModule,
+// internal/adapter/outbound/persistence/di.go
+package persistence
 
-    // Adapter — Outbound
-    persistence.Module(),
-
-    // Application — UseCase
-    orderuc.Module(),
-    paymentuc.Module(),
-
-    // Adapter — Inbound
-    grpchandler.Module(),
+import (
+    "go.uber.org/fx"
+    "github.com/yourproject/order-service/internal/domain/repository"
 )
+
+func Module() fx.Option {
+    return fx.Options(
+        fx.Provide(fx.Annotate(NewOrderRepository, fx.As(new(repository.OrderRepository)))),
+    )
+}
 ```
 
-### Infrastructure Modules (`infrastructure/fx/`)
-
-Infrastructure modules (Database, gRPC server) stay in `infrastructure/fx/` — they are not per-package:
+**gRPC Handler — Registration via `fx.Invoke`**:
 
 ```go
+// internal/adapter/inbound/grpc/di.go
+package grpc
+
+import (
+    "go.uber.org/fx"
+    pb "github.com/yourproject/go-proto/order/v1"
+    "google.golang.org/grpc"
+)
+
+func Module() fx.Option {
+    return fx.Options(
+        fx.Provide(NewOrderHandler),
+        fx.Invoke(func(server *grpc.Server, h *OrderHandler) {
+            pb.RegisterOrderServiceServer(server, h)
+        }),
+    )
+}
+```
+
+**Infrastructure — Config + Logger + Database + Tracer + gRPC Server**:
+
+```go
+// internal/infrastructure/fx/config_module.go
+var ConfigModule = fx.Provide(config.Load)  // Fail-Fast: fx.New fails if config invalid
+
+// internal/infrastructure/fx/logger_module.go
+var LoggerModule = fx.Provide(func(cfg *config.Config) (*zap.Logger, error) {
+    if cfg.Env == "production" {
+        return zap.NewProduction()
+    }
+    return zap.NewDevelopment()
+})
+
 // internal/infrastructure/fx/database_module.go
 var DatabaseModule = fx.Options(
     fx.Provide(func(cfg *config.Config) (*pgxpool.Pool, error) {
         return database.NewPool(context.Background(), cfg.Database.URL())
     }),
-    fx.Provide(func(pool *pgxpool.Pool) port.TxManager {
-        return database.NewTxManager(pool)
+    fx.Provide(fx.Annotate(
+        database.NewTxManager,
+        fx.As(new(port.TxManager)),
+    )),
+)
+
+// internal/infrastructure/fx/tracer_module.go
+var TracerModule = fx.Options(
+    fx.Provide(tracer.NewProvider),  // Returns *sdktrace.TracerProvider
+    fx.Invoke(func(lc fx.Lifecycle, tp *sdktrace.TracerProvider) {
+        otel.SetTracerProvider(tp)
+        lc.Append(fx.Hook{
+            OnStop: func(ctx context.Context) error {
+                return tp.Shutdown(ctx)
+            },
+        })
     }),
 )
-```
 
-```go
 // internal/infrastructure/fx/grpc_module.go
 var GRPCModule = fx.Options(
     fx.Provide(NewGRPCServer),
-    fx.Invoke(RegisterGRPCServices),  // Invoke: side-effect only (register handlers)
+    fx.Invoke(startGRPCServer),
 )
 
 func NewGRPCServer(logger *zap.Logger, metrics *prometheus.Registry, jwtValidator *jwt.Validator, limiter *ratelimit.Limiter) *grpc.Server {
@@ -508,44 +608,42 @@ func NewGRPCServer(logger *zap.Logger, metrics *prometheus.Registry, jwtValidato
             interceptor.MetricsInterceptor(metrics),     // 5. Prometheus metrics
             interceptor.RateLimitInterceptor(limiter),   // 6. Rate limiting
             interceptor.AuthInterceptor(jwtValidator),   // 7. Authentication
-            interceptor.ErrorMappingInterceptor(),       // 8. Error mapping
+            interceptor.ErrorMappingInterceptor(),       // 8. Error mapping (outermost = last to run)
         ),
     )
 }
 
-func RegisterGRPCServices(server *grpc.Server, orderHandler *handler.OrderHandler) {
-    pb.RegisterOrderServiceServer(server, orderHandler)
-    // Register gRPC Health Check (see infrastructure.md)
-}
-```
-
-### Fx Key Rules
-
-| Concept | When to Use |
-|---------|-------------|
-| `fx.Provide` | Constructors that return types for others to depend on |
-| `fx.Invoke` | Side-effects (register handlers, start pollers) — runs at startup |
-| `fx.As(new(Interface))` | Bind concrete type to interface (dependency inversion at DI layer) |
-| `fx.Annotate` + `fx.ParamTags` | Disambiguate multiple implementations of the same interface |
-| `fx.Lifecycle` | Register `OnStart` / `OnStop` hooks (server listen, graceful shutdown) |
-
-### Lifecycle Hooks
-
-```go
-fx.Invoke(func(lc fx.Lifecycle, server *grpc.Server, cfg *config.Config) {
+func startGRPCServer(lc fx.Lifecycle, server *grpc.Server, cfg *config.Config, logger *zap.Logger) {
     lc.Append(fx.Hook{
         OnStart: func(ctx context.Context) error {
-            lis, err := net.Listen("tcp", ":"+cfg.Server.Port)
+            lis, err := net.Listen("tcp", ":"+cfg.Server.GRPCPort)
             if err != nil { return err }
+            logger.Info("gRPC server listening", zap.String("port", cfg.Server.GRPCPort))
             go server.Serve(lis)
             return nil
         },
         OnStop: func(ctx context.Context) error {
+            logger.Info("gRPC server shutting down")
             server.GracefulStop()
             return nil
         },
     })
-})
+}
+```
+
+### Dependency Graph
+
+```
+main.go
+  └─ fx.New()
+       ├─ ConfigModule          → *config.Config
+       ├─ LoggerModule          → *zap.Logger
+       ├─ DatabaseModule        → *pgxpool.Pool, port.TxManager
+       ├─ TracerModule          → *sdktrace.TracerProvider
+       ├─ GRPCModule            → *grpc.Server (+ Lifecycle hooks)
+       ├─ persistence.Module()  → repository.OrderRepository (impl)
+       ├─ orderuc.Module()      → input.CreateOrderUseCase, input.GetOrderUseCase, ...
+       └─ grpchandler.Module()  → *OrderHandler (+ fx.Invoke registers to grpc.Server)
 ```
 
 ### Common Mistake: Circular Dependencies

@@ -464,7 +464,7 @@ Use manual mapper functions for compile-time type safety. Pair with `lo.Map` for
 // Entity → gRPC Response
 func OrderToResponse(e *entity.Order) *pb.OrderResponse {
     return &pb.OrderResponse{
-        Id: e.ID.String(), Status: string(e.Status),
+        Id: e.ID.String(), Status: e.Status.String(),
         Amount: e.TotalAmount.Amount, Currency: e.TotalAmount.Currency,
         CreatedAt: timestamppb.New(e.CreatedAt),
     }

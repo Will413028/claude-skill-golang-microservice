@@ -1,6 +1,8 @@
 # REST API Patterns
 
 Patterns for building RESTful APIs with Go (Gin), following Clean Architecture principles.
+For **service-internal** REST endpoints where the service itself owns the business logic (Handler → UseCase → Repository).
+For **API Gateway** patterns (REST → gRPC translation, no UseCase), see [http-gateway.md](http-gateway.md).
 
 ## Table of Contents
 

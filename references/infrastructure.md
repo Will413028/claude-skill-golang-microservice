@@ -324,6 +324,244 @@ groups:
 | Repository | SQL correctness, mapping, optimistic lock behavior | Integration tests with testcontainers |
 | gRPC Handler | Request validation, DTO mapping | Test mapper functions as unit tests |
 
+### Entity Unit Test
+
+Entity 不依賴外部套件，純邏輯測試：
+
+```go
+// internal/domain/entity/order_test.go
+package entity_test
+
+import (
+    "testing"
+    "time"
+
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+    "github.com/yourproject/order-service/internal/domain/entity"
+)
+
+func TestOrder_Confirm(t *testing.T) {
+    now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+    t.Run("pending → confirmed succeeds", func(t *testing.T) {
+        order := &entity.Order{Status: entity.OrderStatusPending}
+
+        err := order.Confirm(now)
+
+        require.NoError(t, err)
+        assert.Equal(t, entity.OrderStatusConfirmed, order.Status)
+        assert.Equal(t, now, order.UpdatedAt)
+
+        // Verify Domain Event collected
+        require.Len(t, order.Events(), 1)
+        assert.Equal(t, "order.status_changed", order.Events()[0].EventType())
+    })
+
+    t.Run("paid → confirmed fails", func(t *testing.T) {
+        order := &entity.Order{Status: entity.OrderStatusPaid}
+
+        err := order.Confirm(now)
+
+        assert.ErrorIs(t, err, entity.ErrInvalidTransition)
+        assert.Equal(t, entity.OrderStatusPaid, order.Status) // Status unchanged
+        assert.Empty(t, order.Events())                        // No event on failure
+    })
+}
+```
+
+### UseCase Unit Test (Mock Repository)
+
+UseCase 測試使用 `mockery` 生成的 mock：
+
+```bash
+# 安裝 mockery
+go install github.com/vektra/mockery/v2@latest
+
+# 產生 mock（在 service 根目錄執行）
+mockery --dir=internal/domain/repository --name=OrderRepository --output=internal/domain/repository/mocks
+```
+
+```go
+// internal/application/usecase/orderuc/confirm_order_test.go
+package orderuc_test
+
+import (
+    "context"
+    "testing"
+    "time"
+
+    "github.com/google/uuid"
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/mock"
+    "github.com/stretchr/testify/require"
+    "github.com/yourproject/order-service/internal/application/usecase/orderuc"
+    "github.com/yourproject/order-service/internal/domain"
+    "github.com/yourproject/order-service/internal/domain/entity"
+    mockRepo "github.com/yourproject/order-service/internal/domain/repository/mocks"
+)
+
+func TestConfirmOrderUseCase(t *testing.T) {
+    ctx := context.Background()
+    orderID := uuid.New()
+
+    t.Run("success", func(t *testing.T) {
+        repo := mockRepo.NewMockOrderRepository(t)
+        repo.EXPECT().GetByID(ctx, orderID).Return(&entity.Order{
+            ID: orderID, Status: entity.OrderStatusPending,
+        }, nil)
+        repo.EXPECT().Update(ctx, mock.AnythingOfType("*entity.Order")).Return(nil)
+
+        uc := orderuc.NewConfirmOrderUseCase(repo)
+        err := uc.Execute(ctx, orderID)
+
+        require.NoError(t, err)
+    })
+
+    t.Run("order not found", func(t *testing.T) {
+        repo := mockRepo.NewMockOrderRepository(t)
+        repo.EXPECT().GetByID(ctx, orderID).Return(nil, domain.ErrOrderNotFound)
+
+        uc := orderuc.NewConfirmOrderUseCase(repo)
+        err := uc.Execute(ctx, orderID)
+
+        assert.ErrorIs(t, err, domain.ErrOrderNotFound)
+    })
+
+    t.Run("invalid transition", func(t *testing.T) {
+        repo := mockRepo.NewMockOrderRepository(t)
+        repo.EXPECT().GetByID(ctx, orderID).Return(&entity.Order{
+            ID: orderID, Status: entity.OrderStatusShipped, // Cannot confirm shipped order
+        }, nil)
+
+        uc := orderuc.NewConfirmOrderUseCase(repo)
+        err := uc.Execute(ctx, orderID)
+
+        assert.ErrorIs(t, err, entity.ErrInvalidTransition)
+        repo.AssertNotCalled(t, "Update") // Update should NOT be called
+    })
+}
+```
+
+### Repository Integration Test (testcontainers)
+
+Repository 測試使用真實 PostgreSQL，確保 SQL 正確：
+
+```go
+// internal/adapter/outbound/persistence/order_repository_test.go
+package persistence_test
+
+import (
+    "context"
+    "testing"
+
+    "github.com/google/uuid"
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+    "github.com/testcontainers/testcontainers-go"
+    "github.com/testcontainers/testcontainers-go/modules/postgres"
+    "github.com/testcontainers/testcontainers-go/wait"
+    "github.com/yourproject/order-service/internal/adapter/outbound/persistence"
+    "github.com/yourproject/order-service/internal/domain"
+    "github.com/yourproject/order-service/internal/domain/entity"
+    "github.com/yourproject/order-service/internal/domain/valueobject"
+)
+
+func setupTestDB(t *testing.T) *pgxpool.Pool {
+    t.Helper()
+    ctx := context.Background()
+
+    container, err := postgres.Run(ctx, "postgres:17",
+        postgres.WithInitScripts("../../../../migrations/init.sql"), // Apply schema
+        postgres.WithDatabase("testdb"),
+        testcontainers.WithWaitStrategy(
+            wait.ForLog("database system is ready to accept connections").
+                WithOccurrence(2),
+        ),
+    )
+    require.NoError(t, err)
+    t.Cleanup(func() { container.Terminate(ctx) })
+
+    connStr, err := container.ConnectionString(ctx, "sslmode=disable")
+    require.NoError(t, err)
+
+    pool, err := pgxpool.New(ctx, connStr)
+    require.NoError(t, err)
+    t.Cleanup(pool.Close)
+
+    return pool
+}
+
+func TestOrderRepository_Create_And_GetByID(t *testing.T) {
+    pool := setupTestDB(t)
+    repo := persistence.NewOrderRepository(pool)
+    ctx := context.Background()
+
+    order := &entity.Order{
+        UserID: uuid.New(),
+        Status: entity.OrderStatusPending,
+        TotalAmount: valueobject.Money{Amount: 9900, Currency: "TWD"},
+    }
+
+    // Create
+    err := repo.Create(ctx, order)
+    require.NoError(t, err)
+    assert.NotEqual(t, uuid.Nil, order.ID)       // ID populated by DB
+    assert.Equal(t, 1, order.Version)              // Version starts at 1
+    assert.False(t, order.CreatedAt.IsZero())       // Timestamps populated
+
+    // GetByID
+    found, err := repo.GetByID(ctx, order.ID)
+    require.NoError(t, err)
+    assert.Equal(t, order.ID, found.ID)
+    assert.Equal(t, entity.OrderStatusPending, found.Status)
+    assert.Equal(t, int64(9900), found.TotalAmount.Amount)
+    assert.Equal(t, "TWD", found.TotalAmount.Currency)
+}
+
+func TestOrderRepository_GetByID_NotFound(t *testing.T) {
+    pool := setupTestDB(t)
+    repo := persistence.NewOrderRepository(pool)
+
+    _, err := repo.GetByID(context.Background(), uuid.New())
+
+    assert.ErrorIs(t, err, domain.ErrOrderNotFound)
+}
+
+func TestOrderRepository_Update_OptimisticLock(t *testing.T) {
+    pool := setupTestDB(t)
+    repo := persistence.NewOrderRepository(pool)
+    ctx := context.Background()
+
+    // Create order
+    order := &entity.Order{
+        UserID: uuid.New(), Status: entity.OrderStatusPending,
+        TotalAmount: valueobject.Money{Amount: 5000, Currency: "TWD"},
+    }
+    require.NoError(t, repo.Create(ctx, order))
+
+    // Simulate concurrent update: load same entity twice
+    order1, _ := repo.GetByID(ctx, order.ID)
+    order2, _ := repo.GetByID(ctx, order.ID)
+
+    // First update succeeds
+    order1.Status = entity.OrderStatusConfirmed
+    require.NoError(t, repo.Update(ctx, order1))
+
+    // Second update fails — version conflict
+    order2.Status = entity.OrderStatusCancelled
+    err := repo.Update(ctx, order2)
+    assert.ErrorIs(t, err, domain.ErrOptimisticLock)
+}
+```
+
+**Key points**:
+- `setupTestDB` uses `testcontainers-go` to spin up a real PostgreSQL 17 container per test
+- `t.Cleanup` ensures container + pool are torn down after test
+- Apply schema via `postgres.WithInitScripts` — uses same migration files as production
+- Test the important behaviors: CRUD, not-found mapping, optimistic lock conflict
+
 ## CI/CD Pipeline
 
 ```yaml
