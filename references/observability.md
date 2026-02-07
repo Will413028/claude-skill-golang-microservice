@@ -16,6 +16,7 @@ Complete guide for implementing observability in Go microservices using **Grafan
 4. [Metrics (Prometheus + Mimir)](#metrics-prometheus--mimir)
 5. [Correlation (Logs ↔ Traces ↔ Metrics)](#correlation-logs--traces--metrics)
 6. [Grafana Dashboards & Alerts](#grafana-dashboards--alerts)
+7. [Quick Reference](#quick-reference)
 
 ---
 

@@ -8,7 +8,7 @@
   - [Repository Implementation Pattern](#repository-implementation-pattern)
 - [Connection Pool Tuning](#connection-pool-tuning)
 - [Configuration Management](#configuration-management)
-- [Logging Standard](#logging-standard)
+- [Logging](#logging)
 
 ## Database-per-Service
 
