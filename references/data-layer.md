@@ -361,6 +361,7 @@ package persistence
 import (
     "context"
     "errors"
+    "fmt"
     "github.com/google/uuid"
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
@@ -369,6 +370,7 @@ import (
     "github.com/yourproject/order-service/internal/domain"
     "github.com/yourproject/order-service/internal/domain/entity"
     "github.com/yourproject/order-service/internal/domain/repository"
+    "github.com/yourproject/order-service/internal/domain/valueobject"
     "github.com/yourproject/order-service/sqlcgen"
 )
 
@@ -390,7 +392,7 @@ func (r *orderRepository) GetByID(ctx context.Context, id uuid.UUID) (*entity.Or
         }
         return nil, err
     }
-    return r.toEntity(row), nil
+    return r.toEntity(row)
 }
 
 func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
@@ -408,11 +410,15 @@ func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
     return nil
 }
 
-func (r *orderRepository) toEntity(row sqlcgen.Order) *entity.Order {
+func (r *orderRepository) toEntity(row sqlcgen.Order) (*entity.Order, error) {
+    status, err := valueobject.OrderStatusString(sqlutil.TextValue(row.Status))
+    if err != nil {
+        return nil, fmt.Errorf("parse order status %q: %w", sqlutil.TextValue(row.Status), err)
+    }
     return &entity.Order{
         ID:     row.ID,
         UserID: row.UserID,
-        Status: entity.OrderStatusFromString(sqlutil.TextValue(row.Status)),
+        Status: status,
         TotalAmount: valueobject.Money{
             Amount:   sqlutil.Int8Value(row.Amount),
             Currency: sqlutil.TextValue(row.Currency),
@@ -420,7 +426,7 @@ func (r *orderRepository) toEntity(row sqlcgen.Order) *entity.Order {
         Version:   int(sqlutil.Int4Value(row.Version)),
         CreatedAt: sqlutil.TimestamptzValue(row.CreatedAt),
         UpdatedAt: sqlutil.TimestamptzValue(row.UpdatedAt),
-    }
+    }, nil
 }
 ```
 

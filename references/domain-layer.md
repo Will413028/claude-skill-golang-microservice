@@ -62,7 +62,7 @@ Entity is NOT goroutine-safe. A single Entity instance must only be operated wit
 type Order struct {
     ID        uuid.UUID
     UserID    uuid.UUID
-    Status    OrderStatus
+    Status      valueobject.OrderStatus
     TotalAmount valueobject.Money
     Version   int          // Optimistic lock
     CreatedAt time.Time

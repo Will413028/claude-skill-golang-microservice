@@ -618,44 +618,11 @@ type TxManager interface {
 ```
 
 ```go
-// internal/infrastructure/database/tx_manager.go
-type ctxKey string
-const txKey ctxKey = "tx"
-
-type PgxTxManager struct { pool *pgxpool.Pool }
-
-func NewTxManager(pool *pgxpool.Pool) *PgxTxManager {
-    return &PgxTxManager{pool: pool}
-}
-
-func (m *PgxTxManager) WithTx(ctx context.Context, fn func(txCtx context.Context) error) error {
-    // Nested TX protection: if already in TX, execute within existing TX
-    // Prevents UseCase A calling UseCase B from opening independent TX causing inconsistency
-    if _, ok := ctx.Value(txKey).(pgx.Tx); ok {
-        return fn(ctx)
-    }
-
-    tx, err := m.pool.Begin(ctx)
-    if err != nil { return fmt.Errorf("begin tx: %w", err) }
-
-    txCtx := context.WithValue(ctx, txKey, tx)
-
-    if err := fn(txCtx); err != nil {
-        // WithoutCancel ensures rollback executes even if original ctx is cancelled
-        rollbackCtx := context.WithoutCancel(ctx)
-        if rbErr := tx.Rollback(rollbackCtx); rbErr != nil {
-            return fmt.Errorf("rollback failed: %v (original: %w)", rbErr, err)
-        }
-        return err
-    }
-    // WithoutCancel ensures commit succeeds even if caller's ctx is cancelled after fn returns.
-    // fn already completed successfully — losing the commit would silently discard the work.
-    return tx.Commit(context.WithoutCancel(ctx))
-}
-```
-
-```go
 // pkg/database/dbtx.go
+package database
+
+type CtxKey string
+const TxKey CtxKey = "tx"
 
 // DBTX — shared interface satisfied by both pgxpool.Pool and pgx.Tx (Go structural typing).
 // Each service's sqlcgen.DBTX is identical, but we define a shared one here to avoid
@@ -668,8 +635,46 @@ type DBTX interface {
 
 // GetDBTX lets Repository dynamically choose TX or pool
 func GetDBTX(ctx context.Context, pool *pgxpool.Pool) DBTX {
-    if tx, ok := ctx.Value(txKey).(pgx.Tx); ok { return tx }
+    if tx, ok := ctx.Value(TxKey).(pgx.Tx); ok { return tx }
     return pool
+}
+```
+
+```go
+// internal/infrastructure/database/tx_manager.go
+package database
+
+import pkgdb "github.com/yourproject/go-pkg/database"
+
+type PgxTxManager struct { pool *pgxpool.Pool }
+
+func NewTxManager(pool *pgxpool.Pool) *PgxTxManager {
+    return &PgxTxManager{pool: pool}
+}
+
+func (m *PgxTxManager) WithTx(ctx context.Context, fn func(txCtx context.Context) error) error {
+    // Nested TX protection: if already in TX, execute within existing TX
+    // Prevents UseCase A calling UseCase B from opening independent TX causing inconsistency
+    if _, ok := ctx.Value(pkgdb.TxKey).(pgx.Tx); ok {
+        return fn(ctx)
+    }
+
+    tx, err := m.pool.Begin(ctx)
+    if err != nil { return fmt.Errorf("begin tx: %w", err) }
+
+    txCtx := context.WithValue(ctx, pkgdb.TxKey, tx)
+
+    if err := fn(txCtx); err != nil {
+        // WithoutCancel ensures rollback executes even if original ctx is cancelled
+        rollbackCtx := context.WithoutCancel(ctx)
+        if rbErr := tx.Rollback(rollbackCtx); rbErr != nil {
+            return fmt.Errorf("rollback failed: %v (original: %w)", rbErr, err)
+        }
+        return err
+    }
+    // WithoutCancel ensures commit succeeds even if caller's ctx is cancelled after fn returns.
+    // fn already completed successfully — losing the commit would silently discard the work.
+    return tx.Commit(context.WithoutCancel(ctx))
 }
 ```
 

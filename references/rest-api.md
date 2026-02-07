@@ -358,9 +358,9 @@ func ToOrderResponse(order *entity.Order) *OrderResponse {
         }
     }
     return &OrderResponse{
-        ID:        order.ID,
+        ID:        order.ID.String(),
         Status:    order.Status.String(),
-        Total:     order.Total,
+        Total:     order.TotalAmount.Amount,
         Items:     items,
         CreatedAt: order.CreatedAt,
     }
@@ -411,6 +411,7 @@ type OrderHandler struct {
     getOrderUC    input.GetOrderUseCase
     listOrdersUC  input.ListOrdersUseCase
     updateOrderUC input.UpdateOrderUseCase
+    deleteOrderUC input.DeleteOrderUseCase
     logger        *zap.Logger
 }
 
@@ -419,6 +420,7 @@ func NewOrderHandler(
     getOrderUC input.GetOrderUseCase,
     listOrdersUC input.ListOrdersUseCase,
     updateOrderUC input.UpdateOrderUseCase,
+    deleteOrderUC input.DeleteOrderUseCase,
     logger *zap.Logger,
 ) *OrderHandler {
     return &OrderHandler{
@@ -426,6 +428,7 @@ func NewOrderHandler(
         getOrderUC:    getOrderUC,
         listOrdersUC:  listOrdersUC,
         updateOrderUC: updateOrderUC,
+        deleteOrderUC: deleteOrderUC,
         logger:        logger,
     }
 }
