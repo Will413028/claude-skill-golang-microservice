@@ -146,6 +146,7 @@ func registerLifecycle(
 // internal/adapter/inbound/mq/consumer.go
 type Consumer struct {
     channel    *amqp.Channel
+    logger     *zap.Logger
     done       chan struct{}
     wg         sync.WaitGroup
     handlers   map[string]MessageHandler
@@ -170,7 +171,7 @@ func (c *Consumer) consume(queue string, handler MessageHandler) {
 
     msgs, err := c.channel.Consume(queue, "", false, false, false, false, nil)
     if err != nil {
-        zap.L().Error("failed to start consumer", zap.String("queue", queue), zap.Error(err))
+        c.logger.Error("failed to start consumer", zap.String("queue", queue), zap.Error(err))
         return
     }
 
@@ -195,7 +196,7 @@ func (c *Consumer) handleMessage(queue string, msg amqp.Delivery, handler Messag
     defer cancel()
 
     if err := handler.Handle(ctx, msg); err != nil {
-        zap.L().Error("message processing failed",
+        c.logger.Error("message processing failed",
             zap.String("queue", queue), zap.Error(err))
         msg.Nack(false, !isPermanentError(err))
     } else {

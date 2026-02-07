@@ -152,7 +152,7 @@ func (c *OrderController) CreateOrder(ctx *gin.Context) {
         return
     }
 
-    ctx.JSON(http.StatusOK, SuccessResponse{Code: 0, Data: result})
+    ctx.JSON(http.StatusCreated, SuccessResponse{Code: 0, Data: result})
 }
 
 func (c *OrderController) handleError(ctx *gin.Context, err error) {

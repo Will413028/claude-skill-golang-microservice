@@ -100,7 +100,7 @@ import (
     "path/filepath"
     "runtime"
 
-    "github.com/pkg/errors"
+    pkgerrors "github.com/pkg/errors"
 )
 
 // WrapErr 包裝錯誤並捕捉呼叫位置
@@ -110,14 +110,14 @@ func WrapErr(err error, msg string) error {
     }
     _, file, line, ok := runtime.Caller(1)
     if !ok {
-        return errors.Wrap(err, msg)
+        return pkgerrors.Wrap(err, msg)
     }
     // 格式: "users.go:403-msg: original error"
     location := fmt.Sprintf("%s:%d", filepath.Base(file), line)
     if msg != "" {
-        return errors.Wrap(err, fmt.Sprintf("%s-%s", location, msg))
+        return pkgerrors.Wrap(err, fmt.Sprintf("%s-%s", location, msg))
     }
-    return errors.Wrap(err, location)
+    return pkgerrors.Wrap(err, location)
 }
 ```
 

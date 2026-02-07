@@ -498,7 +498,12 @@ type Config struct {
     SampleRate     float64 // 0.0 to 1.0
 }
 
-func Init(ctx context.Context, cfg Config) (func(), error) {
+// NewProvider creates a TracerProvider for Fx injection.
+// Fx module handles otel.SetTracerProvider + Lifecycle shutdown
+// (see architecture.md → TracerModule).
+func NewProvider(cfg Config) (*sdktrace.TracerProvider, error) {
+    ctx := context.Background()
+
     // Create OTLP exporter
     conn, err := grpc.NewClient(cfg.OTLPEndpoint,
         grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -536,30 +541,20 @@ func Init(ctx context.Context, cfg Config) (func(), error) {
         )
     }
 
-    // Create TracerProvider
-    tp := sdktrace.NewTracerProvider(
-        sdktrace.WithBatcher(exporter),
-        sdktrace.WithResource(res),
-        sdktrace.WithSampler(sampler),
-    )
-
-    // Set global TracerProvider
-    otel.SetTracerProvider(tp)
-
     // Set global propagator (W3C Trace Context)
     otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
         propagation.TraceContext{},
         propagation.Baggage{},
     ))
 
-    // Return shutdown function
-    shutdown := func() {
-        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-        defer cancel()
-        _ = tp.Shutdown(ctx)
-    }
+    // Create and return TracerProvider
+    tp := sdktrace.NewTracerProvider(
+        sdktrace.WithBatcher(exporter),
+        sdktrace.WithResource(res),
+        sdktrace.WithSampler(sampler),
+    )
 
-    return shutdown, nil
+    return tp, nil
 }
 ```
 

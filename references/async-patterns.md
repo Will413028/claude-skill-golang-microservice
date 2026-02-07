@@ -604,9 +604,9 @@ Run on Poller startup and periodically to handle events stuck due to Poller cras
 
 ```go
 func (p *OutboxPoller) recoverStuckEvents(ctx context.Context) {
-    result, err := p.repo.UnpickStuckEvents(ctx)
+    affected, err := p.repo.UnpickStuckEvents(ctx)
     if err != nil { p.logger.Error("failed to unpick stuck events", zap.Error(err)); return }
-    if affected := result.RowsAffected(); affected > 0 {
+    if affected > 0 {
         p.logger.Warn("recovered stuck outbox events", zap.Int64("count", affected))
     }
 }

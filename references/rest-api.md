@@ -545,6 +545,7 @@ import (
     "net/http"
 
     "github.com/gin-gonic/gin"
+    "go.uber.org/zap"
 
     "myapp/internal/adapter/inbound/rest/response"
     pkgerrors "myapp/pkg/errors"

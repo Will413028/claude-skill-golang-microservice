@@ -404,7 +404,7 @@ func (e *JobExecutor) WithTracking(
     fn func(ctx context.Context) error,
 ) error {
     traceID := ctxutil.TraceID.Get(ctx)
-    if traceID == "" {
+    if traceID == "unknown" {
         traceID = uuid.New().String()
         ctx = ctxutil.TraceID.Set(ctx, traceID)
     }

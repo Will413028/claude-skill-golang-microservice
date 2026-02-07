@@ -594,7 +594,12 @@ var GRPCModule = fx.Options(
     fx.Invoke(startGRPCServer),
 )
 
-func NewGRPCServer(logger *zap.Logger, metrics *prometheus.Registry, jwtValidator *jwt.Validator, limiter *ratelimit.Limiter) *grpc.Server {
+func NewGRPCServer(
+    logger *zap.Logger,
+    metrics *prometheus.Registry,
+    auth *interceptor.AuthInterceptor,
+    rl *interceptor.RateLimiter,
+) *grpc.Server {
     return grpc.NewServer(
         grpc.ChainUnaryInterceptor(
             otelgrpc.UnaryServerInterceptor(),          // 1. OTel tracing
@@ -602,8 +607,8 @@ func NewGRPCServer(logger *zap.Logger, metrics *prometheus.Registry, jwtValidato
             interceptor.LoggingInterceptor(logger),      // 3. Request logging
             interceptor.RecoveryInterceptor(logger),     // 4. Panic recovery
             interceptor.MetricsInterceptor(metrics),     // 5. Prometheus metrics
-            interceptor.RateLimitInterceptor(limiter),   // 6. Rate limiting
-            interceptor.AuthInterceptor(jwtValidator),   // 7. Authentication
+            interceptor.RateLimitInterceptor(rl),        // 6. Rate limiting
+            auth.Unary(),                                // 7. Authentication
             interceptor.ErrorMappingInterceptor(),       // 8. Error mapping (outermost = last to run)
         ),
     )
@@ -851,9 +856,9 @@ infra-down:
 
 migrate-all:
 	@for dir in services/*/; do \
-		if [ -d "$$dir/migrations" ]; then \
+		if [ -d "$$dir/db/migrations" ]; then \
 			echo "Migrating $$(basename $$dir)..."; \
-			atlas migrate apply --dir "file://$$dir/migrations" \
+			atlas migrate apply --dir "file://$$dir/db/migrations" \
 				--url "postgres://...$$(basename $$dir)_db?sslmode=disable"; \
 		fi; \
 	done
