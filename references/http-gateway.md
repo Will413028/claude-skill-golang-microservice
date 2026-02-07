@@ -146,7 +146,7 @@ func (c *OrderController) CreateOrder(ctx *gin.Context) {
     userID := ctx.GetString("user_id")
 
     // Call gRPC service
-    result, err := c.in.OrderClient.Create(ctx, userID, &req)
+    result, err := c.in.OrderClient.Create(ctx.Request.Context(), userID, &req)
     if err != nil {
         c.handleError(ctx, err)
         return

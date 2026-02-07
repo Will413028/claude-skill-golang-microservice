@@ -82,15 +82,17 @@ var validTransitions = map[OrderStatus][]OrderStatus{
     OrderStatusPaid:      {OrderStatusShipped, OrderStatusCancelled},
 }
 
+// Entity (package entity) imports parent package domain for domain errors.
+// No circular dependency: domain/errors.go has zero imports from entity.
 func (o *Order) canTransitionTo(target OrderStatus) error {
     allowed, ok := validTransitions[o.Status]
     if !ok {
-        return ErrInvalidTransition
+        return domain.ErrInvalidTransition
     }
     for _, s := range allowed {
         if s == target { return nil }
     }
-    return ErrInvalidTransition
+    return domain.ErrInvalidTransition
 }
 
 func (o *Order) transitionTo(target OrderStatus, now time.Time) error {
@@ -305,8 +307,8 @@ type DomainEvent interface {
 
 type OrderStatusChanged struct {
     OrderID uuid.UUID
-    From    OrderStatus
-    To      OrderStatus
+    From    entity.OrderStatus
+    To      entity.OrderStatus
     At      time.Time
 }
 func (e OrderStatusChanged) EventType() string { return "order.status_changed" }

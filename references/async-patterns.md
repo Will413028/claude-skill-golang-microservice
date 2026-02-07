@@ -73,6 +73,22 @@ func (c *OrderEventConsumer) worker(ctx context.Context, msgs <-chan amqp.Delive
     }
 }
 
+// getHeaderInt safely extracts an int from AMQP headers with a default value.
+func getHeaderInt(headers amqp.Table, key string, defaultVal int) int {
+    v, ok := headers[key]
+    if !ok {
+        return defaultVal
+    }
+    switch n := v.(type) {
+    case int64:
+        return int(n)
+    case int32:
+        return int(n)
+    default:
+        return defaultVal
+    }
+}
+
 func (c *OrderEventConsumer) handleMessage(ctx context.Context, msg amqp.Delivery) {
     // 1. Extract trace context from AMQP headers (see MQ Trace Context Propagation)
     ctx = rabbitmq.ExtractTraceContext(ctx, msg.Headers)
@@ -734,8 +750,8 @@ type OutboxRepository interface {
     MarkAsSent(ctx context.Context, id uuid.UUID) error
     MarkAsFailed(ctx context.Context, id uuid.UUID) error
     IncrementRetryAndUnpick(ctx context.Context, id uuid.UUID, errMsg string) error
-    UnpickStuckEvents(ctx context.Context) (sql.Result, error)
-    DeleteSentEventsBefore(ctx context.Context, before time.Time) (sql.Result, error)
+    UnpickStuckEvents(ctx context.Context) (int64, error)
+    DeleteSentEventsBefore(ctx context.Context, before time.Time) (int64, error)
 }
 
 // Saga Repository

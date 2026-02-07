@@ -12,11 +12,7 @@
 
 ## Observability
 
-See [observability.md](observability.md) for complete observability implementation including:
-- Logging (Zap + Loki)
-- Tracing (OTel + Tempo) with sampling strategies
-- Metrics (Prometheus + Mimir)
-- Grafana dashboards and alerts
+See [observability.md](observability.md) for Logging, Tracing, Metrics, and Dashboards.
 
 ## Graceful Shutdown `[Hardening]`
 

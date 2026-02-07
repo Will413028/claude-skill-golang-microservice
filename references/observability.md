@@ -62,13 +62,13 @@ Complete guide for implementing observability in Go microservices using **Grafan
 ### Dependencies
 
 ```go
-// go.mod
+// go.mod (versions are illustrative — use latest stable)
 require (
-    go.uber.org/zap v1.27.0
-    go.opentelemetry.io/otel v1.28.0
-    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.28.0
-    go.opentelemetry.io/otel/sdk v1.28.0
-    github.com/prometheus/client_golang v1.19.0
+    go.uber.org/zap
+    go.opentelemetry.io/otel
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc
+    go.opentelemetry.io/otel/sdk
+    github.com/prometheus/client_golang
 )
 ```
 
@@ -264,7 +264,8 @@ import (
 )
 
 // ErrorFields extracts structured fields from an error
-// Uses the shared DomainError interface from pkg/errors (see grpc-patterns.md)
+// Uses the shared DomainError interface from pkg/errors
+// See [Error Handling Architecture](grpc-patterns.md#error-handling-architecture)
 func ErrorFields(err error) []zap.Field {
     fields := []zap.Field{
         zap.Error(err),

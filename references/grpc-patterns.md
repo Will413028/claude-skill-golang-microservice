@@ -340,6 +340,7 @@ func (c *Consumer) handleDelivery(msg amqp.Delivery) {
     }
 
     // Read event version for progressive migration handling
+    // getHeaderInt: see async-patterns.md — MQ Consumer Patterns for implementation
     eventVersion := getHeaderInt(msg.Headers, "event_version", 1)
 
     // Normal processing with idempotency check...

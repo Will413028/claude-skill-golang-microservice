@@ -149,7 +149,13 @@ func NewCheckoutUseCase(
     txManager output.TxManager,
     logger *zap.Logger,
 ) CheckoutUseCase {
-    return &checkoutUseCase{...}
+    return &checkoutUseCase{
+        addressSvc:  addressSvc,
+        pointsSvc:   pointsSvc,
+        orderClient: orderClient,
+        txManager:   txManager,
+        logger:      logger,
+    }
 }
 
 func (u *checkoutUseCase) Execute(ctx context.Context, req *request.Checkout) (*response.CheckoutResult, error) {

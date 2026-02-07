@@ -398,47 +398,48 @@ func (r *orderRepository) GetByID(ctx context.Context, id uuid.UUID) (*entity.Or
 
 func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
     q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
+    // NOT NULL columns → plain types; nullable columns → sqlutil helpers
     row, err := q.CreateOrder(ctx, sqlcgen.CreateOrderParams{
         UserID:   o.UserID,
-        Status:   sqlutil.Text(o.Status.String()),
-        Amount:   sqlutil.Int8(o.TotalAmount.Amount),
-        Currency: sqlutil.Text(o.TotalAmount.Currency),
+        Status:   o.Status.String(),
+        Amount:   o.TotalAmount.Amount,
+        Currency: o.TotalAmount.Currency,
     })
     if err != nil {
         return err
     }
     o.ID = row.ID
-    o.Version = int(sqlutil.Int4Value(row.Version))
-    o.CreatedAt = sqlutil.TimestamptzValue(row.CreatedAt)
-    o.UpdatedAt = sqlutil.TimestamptzValue(row.UpdatedAt)
+    o.Version = int(row.Version)
+    o.CreatedAt = row.CreatedAt
+    o.UpdatedAt = row.UpdatedAt
     return nil
 }
 
 func (r *orderRepository) toEntity(row sqlcgen.Order) (*entity.Order, error) {
-    status, err := entity.OrderStatusString(sqlutil.TextValue(row.Status))
+    status, err := entity.OrderStatusString(row.Status)
     if err != nil {
-        return nil, fmt.Errorf("parse order status %q: %w", sqlutil.TextValue(row.Status), err)
+        return nil, fmt.Errorf("parse order status %q: %w", row.Status, err)
     }
     return &entity.Order{
         ID:     row.ID,
         UserID: row.UserID,
         Status: status,
         TotalAmount: valueobject.Money{
-            Amount:   sqlutil.Int8Value(row.Amount),
-            Currency: sqlutil.TextValue(row.Currency),
+            Amount:   row.Amount,
+            Currency: row.Currency,
         },
-        Version:   int(sqlutil.Int4Value(row.Version)),
-        CreatedAt: sqlutil.TimestamptzValue(row.CreatedAt),
-        UpdatedAt: sqlutil.TimestamptzValue(row.UpdatedAt),
+        Version:   int(row.Version),
+        CreatedAt: row.CreatedAt,
+        UpdatedAt: row.UpdatedAt,
     }, nil
 }
 ```
 
 **Key Points:**
 - **No helpers.go**: Don't create a `getQueries()` helper function. Each service has its own `sqlcgen.Queries` type, so it can't be shared. Inline the call directly.
-- **TX Support**: `database.GetDBTX(ctx, pool)` returns the transaction from context if available, otherwise the pool. This enables repositories to participate in transactions transparently.
+- **TX Support**: `database.GetDBTX(ctx, pool)` returns the transaction from context if available, otherwise the pool. This enables repositories to participate in transactions transparently. See [TxManager](async-patterns.md#txmanager-async) for the implementation that injects TX into context.
 - **Not Found Pattern**: Return `nil, domain.ErrXxxNotFound` for not found. Repository maps `pgx.ErrNoRows` to domain error; UseCase handles it directly via `errors.Is`.
-- **Type Conventions**: Use `Int4From(int)` / `Int4ToInt()` if your Entity uses `int`, or `Int4(int32)` / `Int4Value()` if it uses `int32`.
+- **Type Conventions**: NOT NULL columns use plain types (`string`, `int64`) directly. Nullable columns use `sqlutil` helpers: `sqlutil.Text(s)` / `sqlutil.TextValue(t)` for `pgtype.Text`, etc.
 
 ## Connection Pool Tuning
 
@@ -526,11 +527,4 @@ func getEnv(key, fallback string) string {
 
 ## Logging
 
-See [observability.md](observability.md) for complete logging implementation including:
-- Logger initialization (Zap + JSON output)
-- Log schema standard
-- Context-aware logging with trace correlation
-- Log level guidelines
-- Error logging patterns
-- Sensitive data masking
-- Log sampling for production
+See [observability.md → Logging](observability.md#logging-zap--loki).

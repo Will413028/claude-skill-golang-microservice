@@ -147,7 +147,15 @@ Every new project follows these four stages. Determine the current stage to deci
    - gobreaker + singleflight gRPC Client
    - MQ Trace Context propagation (AMQP Header Carrier)
 
-5. **Saga timeout monitor** + enhanced idempotency (Redis SET NX)
+5. **Dispatcher Pattern** → Read [references/resilience.md](references/resilience.md)
+   - Generic worker pool for parallel batch processing
+   - Panic-Safe errgroup (recover panics in goroutines)
+
+6. **Distributed Lock (Redlock)** → Read [references/resilience.md](references/resilience.md)
+   - redsync with WatchDog auto-renewal
+   - Application Port (interface) + Adapter (impl)
+
+7. **Saga timeout monitor** + enhanced idempotency (Redis SET NX)
 
 ### Hardening — Must Do
 
@@ -198,7 +206,8 @@ Every new project follows these four stages. Determine the current stage to deci
 | MQ Consumer patterns | — | ✅ Must | — | — |
 | Cache + singleflight + invalidation | Optional (high-read scenarios) | ✅ Must | — | — |
 | Circuit Breaker + singleflight Client | — | ✅ Must | — | — |
-| Dispatcher Pattern (batch processing) | — | ✅ Must | — | — |
+| Dispatcher Pattern + Panic-Safe errgroup | — | ✅ Must | — | — |
+| Distributed Lock (Redlock + WatchDog) | — | ✅ Must | — | — |
 | Idempotency | ✅ Must (DB) | Add Redis SET NX | — | — |
 | Saga timeout monitor | — | ✅ Must | — | — |
 | gRPC Health Check Service | — | — | ✅ Must | — |

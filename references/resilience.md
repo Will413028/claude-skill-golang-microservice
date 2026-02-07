@@ -20,6 +20,7 @@
 ```go
 type CacheLoader[T any] struct {
     redis     *redis.Client
+    logger    *zap.Logger
     sfg       singleflight.Group
     ttl       time.Duration
     emptyTTL  time.Duration  // Empty-value cache TTL (anti-penetration), recommended: 30s–60s
@@ -45,7 +46,7 @@ func (c *CacheLoader[T]) Load(ctx context.Context, key string,
     if err != nil && !errors.Is(err, redis.Nil) {
         // Redis connection error → log and fallback to singleflight + loader
         // Still use singleflight to prevent thundering herd on DB
-        log.Warn("redis get failed, fallback to singleflight + loader", zap.Error(err))
+        c.logger.Warn("redis get failed, fallback to singleflight + loader", zap.Error(err))
     }
 
     // 2. Cache miss or Redis error → singleflight merges concurrent requests
@@ -803,10 +804,4 @@ conn, _ := grpc.NewClient(address, grpc.WithDefaultServiceConfig(retryPolicy))
 
 ## Graceful Shutdown `[Hardening]`
 
-See [infrastructure.md](infrastructure.md#graceful-shutdown-hardening) for complete graceful shutdown implementation including:
-
-- Shutdown sequence diagram
-- Fx Lifecycle hooks implementation
-- MQ Consumer graceful shutdown
-- Outbox Poller graceful shutdown
-- K8s integration (preStop hook, health check)
+See [infrastructure.md → Graceful Shutdown](infrastructure.md#graceful-shutdown-hardening).
