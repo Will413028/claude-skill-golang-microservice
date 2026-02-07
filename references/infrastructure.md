@@ -2,6 +2,7 @@
 
 ## Table of Contents
 
+- [Observability](#observability)
 - [Graceful Shutdown](#graceful-shutdown)
 - [Alert Rules](#alert-rules)
 - [Testing Strategy](#testing-strategy)

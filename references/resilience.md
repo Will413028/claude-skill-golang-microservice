@@ -789,28 +789,10 @@ conn, _ := grpc.NewClient(address, grpc.WithDefaultServiceConfig(retryPolicy))
 
 ## Graceful Shutdown
 
-Shutdown order matters — stop accepting new work before closing dependencies:
+See [infrastructure.md](infrastructure.md#graceful-shutdown) for complete graceful shutdown implementation including:
 
-```go
-func main() {
-    fx.New(
-        infrastructure.Module,
-        fx.Invoke(func(lc fx.Lifecycle, server *GRPCServer, poller *OutboxPoller,
-            sagaMonitor *SagaTimeoutMonitor, cm *rabbitmq.ConnectionManager, db *sqlx.DB) {
-            lc.Append(fx.Hook{
-                OnStop: func(ctx context.Context) error {
-                    server.GracefulStop()      // 1. Stop accepting new requests
-                    poller.Stop()              // 2. Stop Outbox Poller
-                    sagaMonitor.Stop()         // 3. Stop timeout monitor
-                    cm.Close()                 // 4. Close MQ connections
-                    db.Close()                 // 5. Close DB connection pool
-                    return nil
-                },
-            })
-        }),
-    ).Run()
-}
-```
-
-**Stage**: Minimal impact during Docker Compose development. Must complete before entering K8s.
-Pair with K8s `preStop: sleep 5` to wait for endpoint removal from Service.
+- Shutdown sequence diagram
+- Fx Lifecycle hooks implementation
+- MQ Consumer graceful shutdown
+- Outbox Poller graceful shutdown
+- K8s integration (preStop hook, health check)

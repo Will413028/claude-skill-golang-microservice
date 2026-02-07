@@ -13,11 +13,11 @@ Covers MQ consumer patterns, Saga orchestration, and Outbox pattern for reliable
   - [Consumer Graceful Shutdown](#consumer-graceful-shutdown)
 - [Synchronous Saga (MVP Stage)](#synchronous-saga-mvp-stage)
   - [Saga Execution Record Schema](#saga-execution-record-schema)
-  - [Stale Record Scanner](#stale-record-scanner)
+- [Stale Record Scanner](#stale-record-scanner)
 - [Asynchronous Saga + Outbox (Async Stage)](#asynchronous-saga--outbox-async-stage)
-  - [Two-Phase Outbox Poller](#two-phase-outbox-poller)
-  - [TxManager](#txmanager)
-  - [Saga Timeout Monitor](#saga-timeout-monitor)
+- [Two-Phase Outbox Poller](#two-phase-outbox-poller)
+- [TxManager](#txmanager)
+- [Saga Timeout Monitor](#saga-timeout-monitor)
 - [Repository Interface Segregation](#repository-interface-segregation)
 
 ## MQ Consumer Patterns
@@ -181,7 +181,7 @@ func (uc *HandleOrderEventUseCase) Handle(ctx context.Context, eventType string,
 
 ### Consumer Graceful Shutdown
 
-Consumer shutdown must be coordinated with the overall shutdown sequence (see [Graceful Shutdown](resilience.md#graceful-shutdown)):
+Consumer shutdown must be coordinated with the overall shutdown sequence (see [Graceful Shutdown](infrastructure.md#graceful-shutdown)):
 
 ```go
 func (c *OrderEventConsumer) Stop() error {
