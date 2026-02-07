@@ -475,7 +475,7 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
     ctx := context.Background()
 
     container, err := postgres.Run(ctx, "postgres:17",
-        postgres.WithInitScripts("../../../../migrations/init.sql"), // Apply schema
+        postgres.WithInitScripts("../../../../db/schema/schema.sql"), // Apply schema
         postgres.WithDatabase("testdb"),
         testcontainers.WithWaitStrategy(
             wait.ForLog("database system is ready to accept connections").

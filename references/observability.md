@@ -180,11 +180,12 @@ func WithLogger(ctx context.Context, l *zap.Logger) context.Context {
     return context.WithValue(ctx, ctxKey{}, l)
 }
 
-// FromContext retrieves logger from context, enriched with trace info
-func FromContext(ctx context.Context) *zap.Logger {
+// FromContext retrieves logger from context, enriched with trace info.
+// fallback is the caller's injected logger — avoids zap.L() global.
+func FromContext(ctx context.Context, fallback *zap.Logger) *zap.Logger {
     l, ok := ctx.Value(ctxKey{}).(*zap.Logger)
     if !ok {
-        l = zap.L()
+        l = fallback
     }
 
     // Enrich with trace context
@@ -198,17 +199,13 @@ func FromContext(ctx context.Context) *zap.Logger {
     return l
 }
 
-// Ctx is a shorthand for FromContext
-func Ctx(ctx context.Context) *zap.Logger {
-    return FromContext(ctx)
-}
 ```
 
 **Usage in UseCase:**
 
 ```go
 func (u *OrderUseCase) CreateOrder(ctx context.Context, req CreateOrderRequest) (*Order, error) {
-    log := logger.Ctx(ctx)
+    log := logger.FromContext(ctx, u.logger)  // trace-enriched, falls back to injected logger
 
     log.Info("creating order",
         zap.String("event", "order.create.start"),
@@ -281,8 +278,8 @@ func ErrorFields(err error) []zap.Field {
 }
 
 // LogError logs an error with proper context
-func LogError(ctx context.Context, msg string, err error, extraFields ...zap.Field) {
-    log := FromContext(ctx)
+func LogError(ctx context.Context, fallback *zap.Logger, msg string, err error, extraFields ...zap.Field) {
+    log := FromContext(ctx, fallback)
     fields := append(ErrorFields(err), extraFields...)
     log.Error(msg, fields...)
 }
@@ -292,7 +289,7 @@ func LogError(ctx context.Context, msg string, err error, extraFields ...zap.Fie
 
 ```go
 if err := u.paymentClient.Charge(ctx, req); err != nil {
-    logger.LogError(ctx, "payment failed", err,
+    logger.LogError(ctx, u.logger, "payment failed", err,
         zap.String("event", "payment.charge.failed"),
         zap.Int64("order_id", orderID),
         zap.Int64("amount", amount),

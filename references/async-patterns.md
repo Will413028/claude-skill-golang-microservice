@@ -527,6 +527,7 @@ type OutboxPoller struct {
     txManager    TxManager
     publisher    mq.Publisher
     logger       *zap.Logger
+    batchSize    int           // Recommended: 50
     maxRetries   int           // Recommended: 10
     retention    time.Duration // Recommended: 7 days
     minInterval  time.Duration // Recommended: 100ms (high backpressure)
@@ -539,7 +540,7 @@ func (p *OutboxPoller) processBatch(ctx context.Context) int {
     var events []*OutboxEvent
     err := p.txManager.WithTx(ctx, func(txCtx context.Context) error {
         var err error
-        events, err = p.repo.PickUnsentEvents(txCtx, batchSize)
+        events, err = p.repo.PickUnsentEvents(txCtx, p.batchSize)
         return err
     })
     // TX committed here — row locks released
@@ -587,7 +588,7 @@ func (p *OutboxPoller) Start(ctx context.Context) {
             processed := p.processBatch(ctx)
             if processed < 0 {
                 interval = min(interval*2, p.maxInterval)  // Query failed → exponential backoff
-            } else if processed >= batchSize {
+            } else if processed >= p.batchSize {
                 interval = p.minInterval  // More pending → speed up
             } else if processed == 0 {
                 interval = min(interval*2, p.maxInterval)  // Empty → slow down

@@ -169,7 +169,7 @@ func ErrorMappingInterceptor() grpc.UnaryServerInterceptor {
 
         // 1. Check DomainError → map to gRPC Status
         var domErr pkgerrors.DomainError
-        if stderrors.As(err, &domErr) {
+        if errors.As(err, &domErr) {
             grpcCode, ok := domainCodeToGRPC[domErr.DomainCode()]
             if !ok { grpcCode = codes.Internal }
             msg := domErr.Error()
@@ -618,14 +618,14 @@ func (uc *UseCase) Execute(ctx context.Context, req *Request) (*Response, error)
 | DB query | 3–5s | Set at pool level (`config.ConnConfig.QueryTimeout`) |
 | Redis operation | 1–3s | Set via `redis.Options.ReadTimeout` |
 | MQ publish | 3–5s | Set via `amqp.Channel.PublishWithContext` |
-| Saga step (sync) | 5s per step | As defined in saga-patterns.md |
+| Saga step (sync) | 5s per step | As defined in async-patterns.md |
 
 ### Common Mistakes
 
 1. **No timeout at all**: Goroutine blocks forever → goroutine leak → OOM
 2. **Hardcoded timeout ignoring incoming deadline**: Service A gives 3s, but Service B creates fresh 10s context → B keeps working after A already returned error to client
 3. **Same timeout for all steps**: 3 sequential calls each with 5s = 15s possible, but incoming deadline is 10s
-4. **Compensation with caller's context**: Original context cancelled → compensation fails. Always use `context.WithoutCancel` for compensation (see saga-patterns.md)
+4. **Compensation with caller's context**: Original context cancelled → compensation fails. Always use `context.WithoutCancel` for compensation (see async-patterns.md)
 
 ## Authentication / Authorization
 

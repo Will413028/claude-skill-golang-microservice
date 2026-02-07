@@ -574,7 +574,16 @@ var DatabaseModule = fx.Options(
 
 // internal/infrastructure/fx/tracer_module.go
 var TracerModule = fx.Options(
-    fx.Provide(tracer.NewProvider),  // Returns *sdktrace.TracerProvider
+    fx.Provide(func(cfg *config.Config) tracer.Config {
+        return tracer.Config{
+            ServiceName:    cfg.ServiceName,
+            ServiceVersion: version, // set via ldflags at build time
+            Environment:    cfg.Environment,
+            OTLPEndpoint:   cfg.OTel.Endpoint,
+            SampleRate:     cfg.OTel.SamplingRate,
+        }
+    }),
+    fx.Provide(tracer.NewProvider),  // tracer.Config → *sdktrace.TracerProvider
     fx.Invoke(func(lc fx.Lifecycle, tp *sdktrace.TracerProvider) {
         otel.SetTracerProvider(tp)
         lc.Append(fx.Hook{

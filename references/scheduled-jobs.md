@@ -118,6 +118,8 @@ package job
 
 type Controller struct {
     statsContentHourlyJob jobuc.StatsContentHourlyJob
+    lock                  *redislock.DistributedLock  // Added in Distributed Lock section
+    executor              *JobExecutor                // Added in Job Execution History section
     logger                *zap.Logger
 }
 
