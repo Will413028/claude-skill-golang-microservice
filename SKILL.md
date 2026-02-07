@@ -119,6 +119,12 @@ Every new project follows these four stages. Determine the current stage to deci
 
 10. **Quality**: Unit tests + integration tests (testcontainers) + `buf breaking` (Proto contract)
 
+11. **Scheduled Jobs** → Read [references/scheduled-jobs.md](references/scheduled-jobs.md)
+    - Dual entry points (Cron + API for backfill/debug)
+    - Distributed lock (Redis) for K8s replicas
+    - Job execution history (audit log)
+    - Monitoring & alerting (Prometheus metrics)
+
 ### Async & Resilience — Must Do
 
 1. **Async Saga + Outbox** → Read [references/async-patterns.md](references/async-patterns.md)
