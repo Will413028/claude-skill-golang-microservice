@@ -19,6 +19,7 @@ Use **DTO (Data Transfer Object)** naming for application layer input/output.
 |-------|-------------|----------|-------------|
 | **Domain** | `Entity` | `domain/entity/` | Pure business logic, no DB tags |
 | **Domain** | `ValueObject` | `domain/valueobject/` | Immutable, equality by value |
+| **Domain** | `Enum` | `domain/enum/` | Type-safe enums (enumer generated) |
 | **Application** | `Request DTO` | `application/dto/request/` | UseCase input |
 | **Application** | `Response DTO` | `application/dto/response/` | UseCase output |
 | **Adapter** | `sqlc struct` | `sqlcgen/` | Auto-generated, DB mapping |
@@ -140,7 +141,7 @@ func (m Money) Multiply(quantity int) Money {
 
 ## Type-Safe Enums with Enumer
 
-Use [enumer](https://github.com/dmarkham/enumer) to generate type-safe enum methods with JSON/SQL serialization support.
+Use [enumer](https://github.com/dmarkham/enumer) to generate type-safe enum methods. Enums live in a dedicated `domain/enum/` package, separate from entities and value objects.
 
 ### Installation
 
@@ -148,13 +149,27 @@ Use [enumer](https://github.com/dmarkham/enumer) to generate type-safe enum meth
 go install github.com/dmarkham/enumer@latest
 ```
 
+### Directory Layout
+
+```text
+internal/domain/enum/
+├── order.go                          # Order-related enums (hand-written)
+├── zzz_enumer_orderStatus.go         # Generated — sorts to bottom
+├── zzz_enumer_paymentMethod.go       # Generated — sorts to bottom
+├── account.go                        # Account-related enums (hand-written)
+├── zzz_enumer_accountStatus.go       # Generated
+└── zzz_enumer_authProvider.go        # Generated
+```
+
+**Convention**: Generated files use `zzz_` prefix so they sort to the bottom of file explorers.
+
 ### Enum Definition
 
 ```go
-// internal/domain/entity/order_status.go
-package entity
+// internal/domain/enum/order.go
+package enum
 
-//go:generate enumer -type=OrderStatus -trimprefix=OrderStatus -json -sql -transform=snake
+//go:generate enumer -type=OrderStatus -trimprefix=OrderStatus -json -text -transform=snake --output=zzz_enumer_orderStatus.go
 type OrderStatus int32
 
 const (
@@ -165,20 +180,37 @@ const (
     OrderStatusShipped                        // 4
     OrderStatusCancelled                      // 5
 )
+
+//go:generate enumer -type=PaymentMethod -trimprefix=PaymentMethod -json -text -transform=snake --output=zzz_enumer_paymentMethod.go
+type PaymentMethod int32
+
+const (
+    PaymentMethodUnspecified PaymentMethod = iota
+    PaymentMethodCreditCard
+    PaymentMethodBankTransfer
+)
 ```
+
+**Key points**:
+
+- Enumer only supports `int`-based enums (iota), NOT string-based
+- Group related enums in one file by domain concept (e.g., `order.go` has `OrderStatus` + `PaymentMethod`)
+- Use `--output=zzz_enumer_<typeName>.go` for `zzz_` prefix convention
+- Always include `-text` flag (needed for `encoding.TextMarshaler/TextUnmarshaler`)
 
 ### Generated Methods
 
 After running `go generate ./...`, enumer creates:
 
 ```go
-// Auto-generated in order_status_enumer.go
-func (i OrderStatus) String() string           // "pending", "confirmed", etc.
+// Auto-generated in zzz_enumer_orderStatus.go
+func (i OrderStatus) String() string                   // "pending", "confirmed", etc.
 func OrderStatusString(s string) (OrderStatus, error)  // Parse from string
+func (i OrderStatus) IsAOrderStatus() bool             // Validity check
 func (i OrderStatus) MarshalJSON() ([]byte, error)     // JSON serialization
 func (i *OrderStatus) UnmarshalJSON(data []byte) error // JSON deserialization
-func (i OrderStatus) Value() (driver.Value, error)     // SQL driver support
-func (i *OrderStatus) Scan(value interface{}) error    // SQL driver support
+func (i OrderStatus) MarshalText() ([]byte, error)     // Text serialization
+func (i *OrderStatus) UnmarshalText(data []byte) error // Text deserialization
 ```
 
 ### Common Enumer Flags
@@ -186,36 +218,63 @@ func (i *OrderStatus) Scan(value interface{}) error    // SQL driver support
 | Flag | Purpose | Example Output |
 |------|---------|----------------|
 | `-json` | JSON marshal/unmarshal | `"pending"` |
+| `-text` | TextMarshaler/Unmarshaler | Standard serialization |
 | `-sql` | SQL Value/Scan methods | Direct DB storage |
-| `-text` | TextMarshaler/Unmarshaler | Config files |
 | `-yaml` | YAML support | K8s configs |
 | `-trimprefix=X` | Remove prefix from string | `OrderStatusPending` → `"pending"` |
 | `-transform=snake` | String format | `"order_pending"` |
-| `-transform=kebab` | String format | `"order-pending"` |
+| `-transform=lower` | String format | `"orderpending"` |
+| `-transform=title-lower` | String format | `"orderPending"` |
+| `--output=FILE` | Custom output filename | `zzz_enumer_orderStatus.go` |
 
-### Usage in sqlc
+### Enum vs Value Object
+
+| Aspect | Enum (`domain/enum/`) | Value Object (`domain/valueobject/`) |
+| ------ | --------------------- | ------------------------------------- |
+| Behavior | Pure label, no logic | Rich behavior (validation, comparison, arithmetic) |
+| Generation | `enumer` auto-generated methods | Hand-written methods |
+| Example | `AccountStatus`, `AuthProvider` | `Phone` (validation), `Role` (bitmask), `Money` (arithmetic) |
+| Package | Shared across entity/VO/usecase | Domain-internal |
+
+**Rule of thumb**: If the type only has named constants and serialization → `enum/`. If it has validation, arithmetic, or complex equality → `valueobject/`.
+
+### Usage in Repository (without -sql flag)
+
+When using sqlc with `sqlutil` helpers (storing enums as strings in DB), parse in `toEntity()`:
+
+```go
+func (r *repo) toEntity(row sqlcgen.Order) (*entity.Order, error) {
+    status, err := enum.OrderStatusString(sqlutil.TextValue(row.Status))
+    if err != nil {
+        return nil, fmt.Errorf("invalid order status: %w", err)
+    }
+    return &entity.Order{
+        Status: status,
+        // ...
+    }, nil
+}
+```
+
+### Usage in Repository (with -sql flag)
 
 With `-sql` flag, enums work directly with sqlc-generated code:
 
-```sql
--- queries/order.sql
--- name: UpdateOrderStatus :exec
-UPDATE orders SET status = $2 WHERE id = $1;
-```
-
 ```go
-// Repository uses enum directly
-func (r *repo) UpdateStatus(ctx context.Context, id uuid.UUID, status entity.OrderStatus) error {
+func (r *repo) UpdateStatus(ctx context.Context, id uuid.UUID, status enum.OrderStatus) error {
     return r.q.UpdateOrderStatus(ctx, id, status)  // enum auto-converts via Value()
 }
 ```
 
 ### Best Practices
 
-1. **First value = zero/unknown**: Start with `Unspecified` or `Unknown` as `iota` value 0
-2. **Prefix convention**: Use type name as prefix (`OrderStatusPending`), trim with `-trimprefix`
-3. **Location**: Place enums in `domain/entity/` alongside the Entity that owns the status
-4. **Generate on CI**: Include `go generate ./...` in CI pipeline
+1. **Dedicated package**: Place all enums in `domain/enum/`, NOT in `entity/` or `valueobject/`
+2. **Group by domain**: Related enums share one file (e.g., `account.go` has `AccountStatus` + `AuthProvider`)
+3. **`zzz_` prefix**: Always use `--output=zzz_enumer_<typeName>.go` so generated files sort to bottom
+4. **First value = zero/unknown**: Start with `Unspecified` or `Unknown` as `iota` value 0
+5. **Prefix convention**: Use type name as prefix (`OrderStatusPending`), trim with `-trimprefix`
+6. **Standard flags**: Always include `-json -text`; add `-sql` only if DB column uses the enum type directly
+7. **Generate on CI**: Include `go generate ./...` in CI pipeline
+8. **Int-based only**: Enumer requires `int`-based types with `iota` — do NOT use `string` constants
 
 ## Repository Interface
 

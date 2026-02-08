@@ -23,7 +23,8 @@ services/xxx-service/
 ├── internal/
 │   ├── domain/                         # Domain Layer
 │   │   ├── entity/                     # Entity + state machine
-│   │   ├── valueobject/                # Value Object (immutable)
+│   │   ├── enum/                       # Type-safe enums (enumer generated)
+│   │   ├── valueobject/                # Value Object (immutable, with behavior logic)
 │   │   ├── repository/                 # Repository Interface (interface only)
 │   │   ├── event/                      # Domain Event definitions (with EventType() + Version())
 │   │   └── service/                    # Domain Service (cross-entity business logic, zero deps)
