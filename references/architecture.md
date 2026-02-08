@@ -422,7 +422,7 @@ internal/
         ├── config_module.go       # ConfigModule
         ├── logger_module.go       # LoggerModule
         ├── database_module.go     # DatabaseModule + TxManager
-        ├── tracer_module.go       # TracerModule (OTel)
+        ├── otel_module.go         # OTelModule (TracerProvider + lifecycle)
         └── grpc_module.go         # GRPCModule + NewGRPCServer + Lifecycle
 ```
 
@@ -464,11 +464,11 @@ import (
 
 func main() {
     fx.New(
-        // Infrastructure (config, database, gRPC server, logger, tracer)
+        // Infrastructure (config, logger, OTel, database, gRPC server)
         infrafx.ConfigModule,
         infrafx.LoggerModule,
+        infrafx.OTelModule,       // after LoggerModule (needs *zap.Logger)
         infrafx.DatabaseModule,
-        infrafx.TracerModule,
         infrafx.GRPCModule,
 
         // Adapter — Outbound (repository implementations)
@@ -573,27 +573,19 @@ var DatabaseModule = fx.Options(
     )),
 )
 
-// internal/infrastructure/fx/tracer_module.go
-var TracerModule = fx.Options(
-    fx.Provide(func(cfg *config.Config) tracer.Config {
-        return tracer.Config{
-            ServiceName:    cfg.ServiceName,
-            ServiceVersion: version, // set via ldflags at build time
-            Environment:    cfg.Environment,
-            OTLPEndpoint:   cfg.OTel.Endpoint,
-            SampleRate:     cfg.OTel.SamplingRate,
-        }
-    }),
-    fx.Provide(tracer.NewProvider),  // tracer.Config → *sdktrace.TracerProvider
-    fx.Invoke(func(lc fx.Lifecycle, tp *sdktrace.TracerProvider) {
-        otel.SetTracerProvider(tp)
-        lc.Append(fx.Hook{
-            OnStop: func(ctx context.Context) error {
-                return tp.Shutdown(ctx)
-            },
-        })
-    }),
-)
+// internal/infrastructure/fx/otel_module.go
+// Uses shared pkg/otel.InitTracer — env-var-driven, no Config struct needed.
+// fx.Invoke (not fx.Provide) because this is a side-effect (sets global TracerProvider).
+// Place after LoggerModule in main.go (depends on *zap.Logger).
+var OTelModule = fx.Invoke(func(lc fx.Lifecycle, logger *zap.Logger) {
+    shutdown := pkgotel.InitTracer("order-service", logger)  // ← change per service
+    lc.Append(fx.Hook{
+        OnStop: func(ctx context.Context) error {
+            logger.Info("Shutting down tracer provider")
+            return shutdown(ctx)
+        },
+    })
+})
 
 // internal/infrastructure/fx/grpc_module.go
 var GRPCModule = fx.Options(
@@ -608,15 +600,15 @@ func NewGRPCServer(
     rl *interceptor.RateLimiter,
 ) *grpc.Server {
     return grpc.NewServer(
+        interceptor.OTelServerStatsHandler(),  // StatsHandler — separate from interceptor chain
         grpc.ChainUnaryInterceptor(
-            otelgrpc.UnaryServerInterceptor(),          // 1. OTel tracing
-            interceptor.ServerCorrelationInterceptor(),  // 2. correlation_id
-            interceptor.LoggingInterceptor(logger),      // 3. Request logging
-            interceptor.RecoveryInterceptor(logger),     // 4. Panic recovery
-            interceptor.MetricsInterceptor(metrics),     // 5. Prometheus metrics
-            interceptor.RateLimitInterceptor(rl),        // 6. Rate limiting
-            auth.Unary(),                                // 7. Authentication
-            interceptor.ErrorMappingInterceptor(),       // 8. Error mapping (outermost = last to run)
+            interceptor.ServerCorrelationInterceptor(),  // 1. correlation_id / request_id
+            interceptor.LoggingInterceptor(logger),      // 2. Request logging
+            interceptor.RecoveryInterceptor(logger),     // 3. Panic recovery
+            interceptor.MetricsInterceptor(metrics),     // 4. Prometheus metrics
+            interceptor.RateLimitInterceptor(rl),        // 5. Rate limiting
+            auth.Unary(),                                // 6. Authentication
+            interceptor.ErrorMappingInterceptor(),       // 7. Error mapping (innermost)
         ),
     )
 }
@@ -647,7 +639,7 @@ main.go
        ├─ ConfigModule          → *config.Config
        ├─ LoggerModule          → *zap.Logger
        ├─ DatabaseModule        → *pgxpool.Pool, port.TxManager
-       ├─ TracerModule          → *sdktrace.TracerProvider
+       ├─ OTelModule            → (fx.Invoke: sets global TracerProvider + shutdown hook)
        ├─ GRPCModule            → *grpc.Server (+ Lifecycle hooks)
        ├─ persistence.Module()  → repository.OrderRepository (impl)
        ├─ orderuc.Module()      → input.CreateOrderUseCase, input.GetOrderUseCase, ...

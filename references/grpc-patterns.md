@@ -210,20 +210,25 @@ UseCase depends on Output Port interfaces, never on concrete implementations. Ad
 
 ## gRPC Interceptor Chain
 
-Order matters — outermost executes first on request, last on response:
+**OTel tracing uses `StatsHandler` (not Interceptor)**. The `otelgrpc` package deprecated `UnaryServerInterceptor()` in favor of `NewServerHandler()` which handles both unary and streaming.
+
+StatsHandler is a separate gRPC server option, not part of `ChainUnaryInterceptor`:
 
 ```go
+// OTel StatsHandler — separate from interceptor chain
+interceptor.OTelServerStatsHandler(),  // grpc.StatsHandler(otelgrpc.NewServerHandler())
+
+// Interceptor chain — outermost executes first on request, last on response:
 // auth := interceptor.NewAuthInterceptor(jwtValidator, publicMethods)  // injected by Fx
 // rl   := interceptor.NewRateLimiter(globalRPS, globalBurst)           // injected by Fx
 grpc.ChainUnaryInterceptor(
-    otelgrpc.UnaryServerInterceptor(),          // 1. OTel tracing (outermost)
-    interceptor.ServerCorrelationInterceptor(),  // 2. correlation_id / request_id
-    interceptor.LoggingInterceptor(logger),      // 3. Request logging (logs unauthenticated attempts too)
-    interceptor.RecoveryInterceptor(logger),     // 4. Panic recovery
-    interceptor.MetricsInterceptor(metrics),     // 5. Prometheus metrics
-    interceptor.RateLimitInterceptor(rl),        // 6. Rate limiting (before auth to reject floods early)
-    auth.Unary(),                                // 7. Authentication (after rate limit)
-    interceptor.ErrorMappingInterceptor(),       // 8. Error mapping (innermost)
+    interceptor.ServerCorrelationInterceptor(),  // 1. correlation_id / request_id
+    interceptor.LoggingInterceptor(logger),      // 2. Request logging (logs unauthenticated attempts too)
+    interceptor.RecoveryInterceptor(logger),     // 3. Panic recovery
+    interceptor.MetricsInterceptor(metrics),     // 4. Prometheus metrics
+    interceptor.RateLimitInterceptor(rl),        // 5. Rate limiting (before auth to reject floods early)
+    auth.Unary(),                                // 6. Authentication (after rate limit)
+    interceptor.ErrorMappingInterceptor(),       // 7. Error mapping (innermost)
 )
 ```
 

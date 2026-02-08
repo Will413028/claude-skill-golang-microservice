@@ -467,93 +467,125 @@ scrape_configs:
 
 ## Tracing (OTel + Tempo)
 
-### Tracer Initialization
+### Tracer Initialization (Shared Package)
+
+Place in shared `pkg/otel/` so all Go services reuse the same init logic.
+Uses env-var-driven configuration — no Config struct needed for MVP.
 
 ```go
-// pkg/tracer/tracer.go
-package tracer
+// pkg/otel/tracer.go
+package otel
 
 import (
     "context"
-    "time"
+    "os"
 
     "go.opentelemetry.io/otel"
+    "go.opentelemetry.io/otel/attribute"
     "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
     "go.opentelemetry.io/otel/propagation"
     "go.opentelemetry.io/otel/sdk/resource"
     sdktrace "go.opentelemetry.io/otel/sdk/trace"
     semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
-    "google.golang.org/grpc"
-    "google.golang.org/grpc/credentials/insecure"
+    "go.uber.org/zap"
 )
 
-type Config struct {
-    ServiceName    string
-    ServiceVersion string
-    Environment    string
-    OTLPEndpoint   string  // e.g., "tempo:4317"
-    SampleRate     float64 // 0.0 to 1.0
-}
-
-// NewProvider creates a TracerProvider for Fx injection.
-// Fx module handles otel.SetTracerProvider + Lifecycle shutdown
-// (see architecture.md → TracerModule).
-func NewProvider(cfg Config) (*sdktrace.TracerProvider, error) {
-    ctx := context.Background()
-
-    // Create OTLP exporter
-    conn, err := grpc.NewClient(cfg.OTLPEndpoint,
-        grpc.WithTransportCredentials(insecure.NewCredentials()),
-    )
-    if err != nil {
-        return nil, err
+// InitTracer initializes the global TracerProvider with OTLP gRPC exporter.
+// Returns a shutdown function for Fx lifecycle.
+// If OTEL_EXPORTER_OTLP_ENDPOINT is not set, TracerProvider is still created
+// (for context propagation) but traces are not exported.
+func InitTracer(serviceName string, logger *zap.Logger) func(context.Context) error {
+    env := os.Getenv("ENV")
+    if env == "" {
+        env = "development"
     }
 
-    exporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
-    if err != nil {
-        return nil, err
-    }
-
-    // Create resource
-    res, err := resource.Merge(
-        resource.Default(),
-        resource.NewWithAttributes(
-            semconv.SchemaURL,
-            semconv.ServiceName(cfg.ServiceName),
-            semconv.ServiceVersion(cfg.ServiceVersion),
-            semconv.DeploymentEnvironmentName(cfg.Environment),
+    res, _ := resource.New(context.Background(),
+        resource.WithAttributes(
+            semconv.ServiceNameKey.String(serviceName),
+            attribute.String("deployment.environment", env),
         ),
     )
-    if err != nil {
-        return nil, err
+
+    opts := []sdktrace.TracerProviderOption{
+        sdktrace.WithResource(res),
+        sdktrace.WithSampler(sdktrace.AlwaysSample()),
     }
 
-    // Create sampler
-    var sampler sdktrace.Sampler
-    if cfg.Environment == "local" || cfg.Environment == "dev" {
-        sampler = sdktrace.AlwaysSample()
-    } else {
-        sampler = sdktrace.ParentBased(
-            sdktrace.TraceIDRatioBased(cfg.SampleRate),
+    // Only add exporter when endpoint is configured
+    endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if endpoint != "" {
+        exporter, err := otlptracegrpc.New(context.Background(),
+            otlptracegrpc.WithEndpoint(endpoint),
+            otlptracegrpc.WithInsecure(),
         )
+        if err != nil {
+            logger.Warn("Failed to create OTLP exporter, traces will not be exported",
+                zap.Error(err))
+        } else {
+            opts = append(opts, sdktrace.WithBatcher(exporter))
+            logger.Info("OTLP trace exporter enabled",
+                zap.String("endpoint", endpoint))
+        }
     }
 
-    // Set global propagator (W3C Trace Context)
+    tp := sdktrace.NewTracerProvider(opts...)
+    otel.SetTracerProvider(tp)
     otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
         propagation.TraceContext{},
         propagation.Baggage{},
     ))
 
-    // Create and return TracerProvider
-    tp := sdktrace.NewTracerProvider(
-        sdktrace.WithBatcher(exporter),
-        sdktrace.WithResource(res),
-        sdktrace.WithSampler(sampler),
-    )
-
-    return tp, nil
+    return tp.Shutdown
 }
 ```
+
+**Fx OTelModule** (per-service, one file each):
+
+```go
+// internal/infrastructure/fx/otel_module.go
+package fx
+
+import (
+    "context"
+
+    pkgotel "github.com/yourproject/go-pkg/otel"
+    "go.uber.org/fx"
+    "go.uber.org/zap"
+)
+
+var OTelModule = fx.Invoke(func(lc fx.Lifecycle, logger *zap.Logger) {
+    shutdown := pkgotel.InitTracer("order-service", logger)  // ← service name
+    lc.Append(fx.Hook{
+        OnStop: func(ctx context.Context) error {
+            logger.Info("Shutting down tracer provider")
+            return shutdown(ctx)
+        },
+    })
+})
+```
+
+**main.go** — place `OTelModule` after `LoggerModule` (needs `*zap.Logger`):
+
+```go
+fx.New(
+    infrafx.ConfigModule,
+    infrafx.LoggerModule,
+    infrafx.OTelModule,       // ← after LoggerModule
+    infrafx.DatabaseModule,
+    infrafx.GRPCServerModule,
+    // ...
+)
+```
+
+**Design decisions:**
+- `fx.Invoke` (not `fx.Provide`) — OTelModule is a side-effect (sets global TracerProvider), not a dependency others depend on
+- Uses OTLP **gRPC** exporter (Collector port 4317). HTTP Gateway may use OTLP **HTTP** exporter (port 4318) separately
+- No endpoint → no exporter but TracerProvider still created — ensures context propagation works even without a collector
+- `*zap.Logger` injected — matches existing Fx DI pattern, avoids `zap.L()` global
+
+**Pitfall — `semconv.DeploymentEnvironmentName` may not exist in older versions:**
+Use `attribute.String("deployment.environment", env)` instead of `semconv.DeploymentEnvironmentNameKey.String(env)` for compatibility across OTel SDK versions.
 
 ### Span Naming Convention
 
@@ -567,46 +599,215 @@ func NewProvider(cfg Config) (*sdktrace.TracerProvider, error) {
 | MQ Publish | `<exchange> publish` | `order.events publish` |
 | MQ Consume | `<queue> process` | `order.created.payment process` |
 
-### gRPC Interceptor (Server + Client)
+### gRPC OTel Instrumentation (StatsHandler Pattern)
+
+**Use `StatsHandler` (not Interceptor) for OTel gRPC instrumentation.** The `otelgrpc` package deprecated `UnaryServerInterceptor()` / `UnaryClientInterceptor()` in favor of `NewServerHandler()` / `NewClientHandler()`, which supports both unary and streaming without needing separate interceptors.
 
 ```go
-// pkg/grpc/interceptor/tracing.go
+// pkg/middleware/grpc/interceptor/otel_interceptor.go
 package interceptor
 
 import (
-    "context"
-
     "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
     "google.golang.org/grpc"
 )
 
-// TracingServerInterceptor adds tracing to gRPC server
-func TracingServerInterceptor() grpc.UnaryServerInterceptor {
-    return otelgrpc.UnaryServerInterceptor()
+// OTelServerStatsHandler returns a gRPC StatsHandler for server-side tracing.
+// Use with grpc.StatsHandler() server option (NOT in interceptor chain).
+func OTelServerStatsHandler() grpc.ServerOption {
+    return grpc.StatsHandler(otelgrpc.NewServerHandler())
 }
 
-// TracingClientInterceptor adds tracing to gRPC client
-func TracingClientInterceptor() grpc.UnaryClientInterceptor {
-    return otelgrpc.UnaryClientInterceptor()
+// OTelClientStatsHandler returns a gRPC DialOption for client-side tracing.
+// Use with grpc.WithStatsHandler() in Dial/NewClient options.
+func OTelClientStatsHandler() grpc.DialOption {
+    return grpc.WithStatsHandler(otelgrpc.NewClientHandler())
 }
 ```
 
-### HTTP Middleware (Gin)
+**Server-side usage** (in `NewGRPCServer`):
 
 ```go
-// pkg/middleware/tracing.go
-package middleware
-
-import (
-    "github.com/gin-gonic/gin"
-    "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
-)
-
-// Tracing returns Gin middleware for tracing
-func Tracing(serviceName string) gin.HandlerFunc {
-    return otelgin.Middleware(serviceName)
+func NewGRPCServer(logger *zap.Logger) *grpc.Server {
+    return grpc.NewServer(
+        interceptor.OTelServerStatsHandler(),  // StatsHandler (NOT in ChainUnaryInterceptor)
+        grpc.ChainUnaryInterceptor(
+            // OTel is handled by StatsHandler above — do NOT add here
+            interceptor.ServerCorrelationInterceptor(),  // 1. correlation_id / request_id
+            interceptor.LoggingInterceptor(logger),      // 2. Request logging
+            interceptor.RecoveryInterceptor(logger),     // 3. Panic recovery
+            interceptor.ErrorMappingInterceptor(),       // 4. Error mapping (innermost)
+        ),
+    )
 }
 ```
+
+**Client-side usage** (in gRPC client `Dial`):
+
+```go
+conn, err := grpc.NewClient(target,
+    grpc.WithTransportCredentials(insecure.NewCredentials()),
+    interceptor.OTelClientStatsHandler(),  // ← propagates trace context to downstream
+)
+```
+
+### End-to-End Distributed Tracing (HTTP → gRPC → gRPC)
+
+The complete trace chain requires three links:
+
+```
+[gateway] POST /api/v1/auth/login (HTTP span)
+  └── [gateway] /account.AccountService/Login (gRPC client span)
+       └── [account-service] /account.AccountService/Login (gRPC server span)
+```
+
+**Three components needed:**
+
+| # | Component | Where | What it does |
+|---|-----------|-------|-------------|
+| 1 | HTTP TracingMiddleware | Gateway | Creates root span, stores in `c.Request.Context()` |
+| 2 | OTelClientStatsHandler | Gateway gRPC client | Reads trace from ctx, injects into gRPC metadata |
+| 3 | OTelServerStatsHandler | Downstream service | Extracts trace from gRPC metadata, creates child span |
+
+**Critical: Context propagation from HTTP handler → gRPC client**
+
+The most common mistake is using `context.Background()` in gRPC client methods — this **breaks the trace chain**. Client methods must accept and propagate the request context:
+
+```go
+// ❌ BAD — breaks trace chain
+func (c *AccountClient) Login(username, password string) (*pb.AuthResponse, error) {
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    return c.client.Login(ctx, &pb.LoginRequest{...})
+}
+
+// ✅ GOOD — preserves trace chain
+func (c *AccountClient) Login(ctx context.Context, username, password string) (*pb.AuthResponse, error) {
+    ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    return c.client.Login(ctx, &pb.LoginRequest{...})
+}
+```
+
+**Handler passes request context:**
+
+```go
+// ❌ BAD — no trace propagation
+func (h *AuthHandler) Login(c *gin.Context) {
+    resp, err := h.accountClient.Login(req.Username, req.Password)
+}
+
+// ✅ GOOD — trace propagation via c.Request.Context()
+func (h *AuthHandler) Login(c *gin.Context) {
+    resp, err := h.accountClient.Login(c.Request.Context(), req.Username, req.Password)
+}
+```
+
+`c.Request.Context()` carries the span created by `TracingMiddleware`. The `OTelClientStatsHandler` reads it and injects W3C `traceparent` header into gRPC metadata.
+
+### HTTP TracingMiddleware (Gin Gateway)
+
+```go
+// gateway/internal/middleware/tracing.go
+
+func TracingMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        tracer := otel.Tracer("gateway")
+        ctx := otel.GetTextMapPropagator().Extract(c.Request.Context(),
+            propagation.HeaderCarrier(c.Request.Header))
+
+        spanName := c.Request.Method + " " + c.FullPath()
+        ctx, span := tracer.Start(ctx, spanName)
+        defer span.End()
+
+        // Store enriched context back into request — this is what
+        // c.Request.Context() returns in downstream handlers
+        c.Request = c.Request.WithContext(ctx)
+        c.Next()
+
+        span.SetAttributes(attribute.Int("http.status_code", c.Writer.Status()))
+    }
+}
+```
+
+### Monitoring Stack (OTel Collector + Tempo + Grafana)
+
+Recommended monitoring infrastructure for local development and staging:
+
+```yaml
+# monitoring/docker-compose.yml
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      - ./otel-collector/otel-config.yaml:/etc/otelcol-contrib/config.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC (Go services)
+      - "4318:4318"   # OTLP HTTP (Gateway / other)
+
+  tempo:
+    image: grafana/tempo:latest
+    volumes:
+      - ./tempo/tempo-config.yaml:/etc/tempo.yaml
+    command: ["-config.file=/etc/tempo.yaml"]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+```
+
+**OTel Collector config:**
+
+```yaml
+# monitoring/otel-collector/otel-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/tempo]
+```
+
+**Service docker-compose env vars:**
+
+```yaml
+# docker-compose.yml (main services)
+services:
+  account-service:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+  gateway:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+# .env (when monitoring stack is running)
+OTEL_EXPORTER_OTLP_ENDPOINT=host.docker.internal:4317
+```
+
+> **Note:** `host.docker.internal` resolves to host on macOS Docker Desktop. On Linux, use the Docker bridge IP or run monitoring in the same network.
+> Go services use port **4317** (gRPC exporter). If a service uses OTLP HTTP exporter, use port **4318**.
 
 ### MQ Trace Propagation `[Async]`
 
