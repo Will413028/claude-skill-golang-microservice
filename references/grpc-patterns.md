@@ -2,6 +2,7 @@
 
 ## Table of Contents
 
+- [Dual Protocol Support (gRPC + HTTP)](#dual-protocol-support-grpc--http)
 - [Error Handling Architecture](#error-handling-architecture)
 - [Output Ports (Dependency Inversion)](#output-ports-dependency-inversion)
 - [gRPC Interceptor Chain](#grpc-interceptor-chain)
@@ -13,6 +14,51 @@
 - [Context Deadline / Timeout Budget](#context-deadline--timeout-budget)
 - [Authentication / Authorization](#authentication--authorization)
 - [Proto Versioning Strategy](#proto-versioning-strategy)
+
+## Dual Protocol Support (gRPC + HTTP)
+
+Each service supports both gRPC (internal) and HTTP (external), sharing the same UseCase logic:
+
+```
+┌──────────────────────────────────────────────────┐
+│                  Service                          │
+│                                                   │
+│  HTTP Gateway ──→ ┐                               │
+│  (Gin / grpc-gw)  ├──→ UseCase ──→ Repository    │
+│  gRPC Handler ──→ ┘                               │
+└──────────────────────────────────────────────────┘
+```
+
+### Implementation via grpc-gateway (Proto annotations)
+
+```protobuf
+// api/proto/merchant/merchant.proto
+service MerchantService {
+  rpc GetMerchant(GetMerchantRequest) returns (GetMerchantResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/merchants/{id}"
+    };
+  }
+  rpc CreateMerchant(CreateMerchantRequest) returns (CreateMerchantResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/merchants"
+      body: "*"
+    };
+  }
+}
+```
+
+Per-service `buf.gen.yaml` generates both Go gRPC code and HTTP gateway code. See [architecture.md → buf.gen.yaml](architecture.md#bufgenyaml-per-service-generates-go--gateway--swagger).
+
+### When to Use Each Approach
+
+| Approach | When | Example |
+|----------|------|---------|
+| **grpc-gateway** (auto) | Internal APIs, standard CRUD | Admin dashboard APIs |
+| **Gin controllers** (manual) | Custom response format, file upload, complex auth | Customer-facing APIs |
+| **gRPC only** | Service-to-service, no external consumers | Inventory reservation |
+
+See also [infrastructure.md → Dual Protocol Support](infrastructure.md#dual-protocol-support) for port conventions and architecture overview.
 
 ## Error Handling Architecture
 

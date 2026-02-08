@@ -730,84 +730,39 @@ func TracingMiddleware() gin.HandlerFunc {
 }
 ```
 
-### Monitoring Stack (OTel Collector + Tempo + Grafana)
+### Monitoring Stack (Integrated in docker-compose)
 
-Recommended monitoring infrastructure for local development and staging:
+The LGTM observability stack is integrated directly into the main `docker-compose.yaml` (not a separate file). All configuration lives in `monitoring/` at the monorepo root:
 
-```yaml
-# monitoring/docker-compose.yml
-services:
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
-    volumes:
-      - ./otel-collector/otel-config.yaml:/etc/otelcol-contrib/config.yaml
-    ports:
-      - "4317:4317"   # OTLP gRPC (Go services)
-      - "4318:4318"   # OTLP HTTP (Gateway / other)
-
-  tempo:
-    image: grafana/tempo:latest
-    volumes:
-      - ./tempo/tempo-config.yaml:/etc/tempo.yaml
-    command: ["-config.file=/etc/tempo.yaml"]
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3001:3000"
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+```
+monitoring/
+├── grafana/
+│   └── provisioning/
+│       ├── datasources/           # Auto-provision Loki, Tempo, Prometheus
+│       └── dashboards/            # Pre-built dashboards
+├── prometheus/
+│   └── prometheus.yml             # Scrape targets
+├── loki/
+│   └── local-config.yaml
+├── tempo/
+│   └── tempo-config.yaml
+└── otel-collector/
+    └── otel-collector-config.yaml # OTLP receivers → exporters
 ```
 
-**OTel Collector config:**
+See [infrastructure.md → Monitoring Infrastructure](infrastructure.md#monitoring-infrastructure) for the OTel Collector config and docker-compose setup.
+
+See [architecture.md → Docker Compose](architecture.md#docker-compose-infrastructure--services--lgtm) for the complete docker-compose.yaml with services + infra + LGTM.
+
+**Key**: All services in the same docker-compose network can reach `otel-collector:4317` directly. No `host.docker.internal` needed.
 
 ```yaml
-# monitoring/otel-collector/otel-config.yaml
-receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: 0.0.0.0:4317
-      http:
-        endpoint: 0.0.0.0:4318
-
-processors:
-  batch:
-    timeout: 5s
-    send_batch_size: 1024
-
-exporters:
-  otlphttp/tempo:
-    endpoint: http://tempo:4318
-
-service:
-  pipelines:
-    traces:
-      receivers: [otlp]
-      processors: [batch]
-      exporters: [otlphttp/tempo]
+# Service environment (in docker-compose.yaml)
+environment:
+  - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
 ```
 
-**Service docker-compose env vars:**
-
-```yaml
-# docker-compose.yml (main services)
-services:
-  account-service:
-    environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-
-  gateway:
-    environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-
-# .env (when monitoring stack is running)
-OTEL_EXPORTER_OTLP_ENDPOINT=host.docker.internal:4317
-```
-
-> **Note:** `host.docker.internal` resolves to host on macOS Docker Desktop. On Linux, use the Docker bridge IP or run monitoring in the same network.
-> Go services use port **4317** (gRPC exporter). If a service uses OTLP HTTP exporter, use port **4318**.
+> Go services use port **4317** (gRPC OTLP exporter). HTTP Gateway can use port **4318** (HTTP OTLP exporter).
 
 ### MQ Trace Propagation `[Async]`
 

@@ -18,12 +18,18 @@
 
 ```
 services/xxx-service/
-├── cmd/
-│   └── server/
-│       └── main.go                     # Entry point (Main Injector)
+├── .air.toml                           # ⚡ Air 熱重載設定 (開發用)
+├── buf.yaml                            # 🔧 Buf 設定 (per-service)
+├── buf.gen.yaml                        # 🔧 生成 Go & Gateway & Swagger
+├── .go-arch-lint.yml                   # 🛡️ 架構防腐 (層依賴規則)
+├── Dockerfile                          # 🐳 Multi-stage (dev + prod)
 │
-├── internal/
-│   ├── domain/                         # Domain Layer (core, zero external deps)
+├── cmd/
+│   └── xxx-service/                    # 🚀 以服務名命名 (非 server/)
+│       └── main.go                     # 啟動點 (依賴注入)
+│
+├── internal/                           # 🔒 私有核心: Clean Architecture
+│   ├── domain/                         # 🏛️ 核心層 (Entity, Interface, Enum)
 │   │   ├── order.go                    # Entity + Repository Interface + rich methods
 │   │   ├── order_types.go              # Type-safe enums (enumer generated, co-located with Entity)
 │   │   ├── order_event.go              # Domain Events for this aggregate
@@ -31,7 +37,7 @@ services/xxx-service/
 │   │   ├── service/                    # Domain Service (cross-entity business logic, zero deps)
 │   │   └── errors.go                   # Domain error definitions
 │   │
-│   ├── usecase/                        # Application Layer: business flow orchestration
+│   ├── usecase/                        # 🎯 應用層: business flow orchestration
 │   │   ├── create_order.go             # UseCase implementation
 │   │   ├── cancel_order.go
 │   │   ├── dto/                        # Data Transfer Objects
@@ -39,61 +45,51 @@ services/xxx-service/
 │   │   │   └── order_res.go
 │   │   └── di.go                       # fx.Module (UseCase layer DI)
 │   │
-│   ├── service/                        # Application Service: reusable cross-UseCase logic
-│   │   ├── address_service.go
-│   │   ├── points_service.go
-│   │   └── di.go                       # fx.Module (Service layer DI)
-│   │
-│   ├── repository/                     # Data access (Outbound Adapter)
-│   │   ├── postgres/                   # Explicit technology naming
+│   ├── repository/                     # 💾 資料存取層
+│   │   ├── postgres/                   # 🐘 SQL 實作
 │   │   │   ├── gen/                    # 🤖 sqlc auto-generated (DO NOT EDIT)
-│   │   │   │   ├── models.go           # DB Models (maps to table schema)
-│   │   │   │   ├── query.sql.go        # DB Methods (auto-generated)
+│   │   │   │   ├── models.go          # DB Models (maps to table schema)
+│   │   │   │   ├── query.sql.go       # DB Methods (auto-generated)
 │   │   │   │   └── db.go              # DBTX Interface
-│   │   │   ├── order.go                # Implements domain.OrderRepository
-│   │   │   ├── mapper.go              # gen.Model ↔ domain.Entity conversion
-│   │   │   └── di.go                   # fx.Module (Postgres Repository DI)
-│   │   └── di.go                       # fx.Module (Repository module entry)
+│   │   │   ├── order.go               # Implements domain.OrderRepository
+│   │   │   └── mapper.go              # gen.Model ↔ domain.Entity conversion
+│   │   ├── redis/                      # ⚡ 快取層 (optional)
+│   │   │   ├── order_proxy.go          # Cache Decorator (使用 pkg/redis)
+│   │   │   └── cache.go               # Shared cache helpers
+│   │   └── di.go                       # fx.Module (aggregates postgres + redis)
 │   │
-│   ├── client/                         # External service clients (Outbound Adapter)
+│   ├── infrastructure/                 # 🏗️ 基建層: server setup, external infra
+│   │   ├── server.go                   # gRPC/HTTP Server bootstrap
+│   │   └── address_impl.go            # External infra adapters
+│   │
+│   ├── client/                         # 🌐 外部適配: external service clients
 │   │   ├── payment/
-│   │   │   ├── client.go               # Payment API client
+│   │   │   ├── client.go               # Payment API client (e.g., PayUni adapter)
 │   │   │   ├── dto.go                  # Request/Response types
 │   │   │   └── mapper.go              # domain ↔ client DTO conversion
 │   │   ├── inventory/
 │   │   │   └── client.go               # Inventory gRPC client
 │   │   └── di.go                       # fx.Module (Client layer DI)
 │   │
-│   ├── grpc/                           # gRPC interface (Inbound Adapter)
+│   ├── grpc/                           # 📡 傳輸層: gRPC interface (Inbound)
 │   │   ├── server.go                   # gRPC Server setup
 │   │   ├── handler.go                 # gRPC Handler (calls UseCase)
 │   │   ├── mapper.go                  # Protobuf ↔ DTO conversion
 │   │   └── di.go                       # fx.Module (gRPC layer DI)
 │   │
-│   ├── consumer/                       # MQ Consumer (Inbound Adapter, added in Async stage)
-│   │   ├── order_consumer.go
+│   ├── worker/                         # ⚙️ 背景任務 (Outbox Publisher, async jobs)
+│   │   ├── outbox_publisher.go
 │   │   └── di.go
 │   │
-│   ├── config/                         # Configuration
-│   │   ├── config.go
-│   │   └── di.go                       # fx.Module (Config DI)
-│   │
-│   └── app/                            # Application assembly
+│   └── app/                            # 🧩 組裝層: application assembly
 │       └── app.go                      # fx.New() — assembles all modules
 │
-├── db/                                 # Database-related (centralized)
-│   ├── schema/schema.sql               # DDL (single source of truth)
-│   ├── queries/                        # sqlc query definitions
-│   │   ├── order.sql
-│   │   └── outbox.sql
-│   ├── migrations/                     # Atlas auto-generated migrations
-│   ├── sqlc.yaml                       # sqlc configuration
-│   └── atlas.hcl                       # Atlas configuration
+├── db/                                 # 🗄️ 服務專屬 DB 定義
+│   ├── migrations/                     # Atlas 遷移檔
+│   ├── schema.hcl                      # Atlas Schema (HCL, single source of truth)
+│   └── query.sql                       # sqlc 查詢語句
 │
-├── tests/
-├── scripts/
-├── Makefile
-└── Dockerfile
+└── test/                               # 🧪 測試 (Integration, Mocks)
 ```
 
 ### Key Design Decisions
@@ -102,152 +98,140 @@ services/xxx-service/
 |----------|--------|-----------|
 | **Enum location** | `domain/*_types.go` (co-located with Entity) | High cohesion — Enum, Entity, and Repository Interface in same package |
 | **Repository Interface** | Bottom of `domain/{entity}.go` | Go convention: define interface near the domain it serves; avoids separate `repository/` package bloat |
-| **sqlc output** | `repository/postgres/gen/` | Named `gen/` (not `dao/`) to clearly indicate auto-generated code |
-| **Flat directory** | No `adapter/inbound/outbound/` nesting | Go-style flat structure; name by technology (`grpc/`, `postgres/`, `client/`) not by direction |
+| **sqlc output** | `repository/postgres/gen/` | Named `gen/` under `postgres/` to clearly indicate auto-generated DB code |
+| **Cache Decorator** | `repository/redis/xxx_proxy.go` | Proxy pattern — intercepts Repository interface, checks Redis first, falls through to Postgres |
+| **Flat directory** | No `adapter/inbound/outbound/` nesting | Go-style flat structure; name by concern (`grpc/`, `repository/`, `client/`) not by direction |
 | **DI per-layer** | Each package has `di.go` with `fx.Module` | Modular, self-contained; `app.go` only assembles modules |
+| **cmd naming** | `cmd/{service-name}/` (not `cmd/server/`) | Matches service identity, supports multi-binary if needed |
+| **worker package** | Separate `internal/worker/` | Background tasks (Outbox Publisher) isolated from request handlers |
+| **Architecture guard** | `.go-arch-lint.yml` | Automated enforcement of layer dependency rules |
 
-> **Database Directory Convention**: All database-related files (`schema/`, `queries/`, `migrations/`, `sqlc.yaml`, `atlas.hcl`) are centralized in the `db/` directory to keep the service root clean. Run commands from within `db/`:
+> **Database Directory Convention**: All database-related files (`schema.hcl`, `query.sql`, `migrations/`) are centralized in the `db/` directory to keep the service root clean. Atlas uses HCL for declarative schema:
 >
 > ```bash
 > cd db && sqlc generate           # Generate Go code to internal/repository/postgres/gen/
-> cd db && atlas migrate diff ...  # Generate migration
+> cd db && atlas migrate diff ...  # Generate migration from schema.hcl
 > ```
 
-### Application Layer: Service + UseCase 分層
+### Cache Decorator Pattern (RepoRedis)
 
-Application 層採用 **Service + UseCase 分層架構**，分離可重用邏輯與業務流程編排：
+UseCase only depends on the Repository interface. A Redis cache decorator wraps the Postgres implementation, keeping business logic completely clean:
 
 ```
-internal/
-├── service/                    # Application Service（可重用邏輯）
-│   ├── address_service.go
-│   ├── points_service.go
-│   └── di.go                  # fx.Module
-│
-├── usecase/                    # UseCase（業務流程編排）
-│   ├── checkout_usecase.go
-│   ├── certification_usecase.go
-│   ├── dto/                   # Data Transfer Objects
-│   │   ├── checkout_req.go
-│   │   └── checkout_res.go
-│   └── di.go                  # fx.Module
+UseCase → Repository Interface → RepoRedis (Proxy) → Redis Cache
+                                                    ↓ (miss)
+                                              RepoPG (Postgres)
 ```
-
-| Layer | Location | Purpose | 方法數 |
-|-------|----------|---------|--------|
-| **Application Service** | `internal/service/` | 可重用的基礎操作，被多個 UseCase 共用 | 多個相關方法 |
-| **UseCase** | `internal/usecase/` | 業務流程編排，組合多個 Services | 1-3 個公開方法 |
-| **Domain Service** | `internal/domain/service/` | 純業務邏輯，跨多個 Entity，零外部依賴 | 依需求 |
-
-### Application Service 設計
-
-Service 封裝**可重用的基礎操作**，每個 Service 對應一個 Aggregate：
 
 ```go
-// internal/service/address_service.go
-type AddressService interface {
-    Get(ctx context.Context, id uuid.UUID) (*dto.Address, error)
-    List(ctx context.Context, accountID uuid.UUID) ([]*dto.Address, error)
-    Create(ctx context.Context, req *dto.CreateAddressRequest) error
-    Update(ctx context.Context, req *dto.UpdateAddressRequest) error
-    Delete(ctx context.Context, id uuid.UUID) error
-    SetDefault(ctx context.Context, accountID, addressID uuid.UUID) error
+// internal/repository/redis/order_proxy.go
+type orderRedisProxy struct {
+    pg    domain.OrderRepository  // actual Postgres impl
+    redis *redis.Client
+    ttl   time.Duration
 }
 
-type addressService struct {
-    addressRepo domain.AddressRepository  // 依賴 domain 層的 Repository 介面
-    logger      *zap.Logger
+func NewOrderRedisProxy(pg domain.OrderRepository, redis *redis.Client) domain.OrderRepository {
+    return &orderRedisProxy{pg: pg, redis: redis, ttl: 5 * time.Minute}
 }
 
-func NewAddressService(repo domain.AddressRepository, logger *zap.Logger) AddressService {
-    return &addressService{addressRepo: repo, logger: logger}
-}
-```
+func (r *orderRedisProxy) GetByID(ctx context.Context, id uuid.UUID) (*domain.Order, error) {
+    // 1. Check Redis
+    cached, err := r.getFromCache(ctx, id)
+    if err == nil { return cached, nil }
 
-### UseCase 設計
-
-UseCase 負責**業務流程編排**，組合多個 Services 完成完整流程：
-
-```go
-// internal/usecase/checkout_usecase.go
-type CheckoutUseCase struct {
-    addressSvc  service.AddressService
-    pointsSvc   service.PointsService
-    orderClient orderClient               // local interface (Go consumer-defined)
-    txManager   txManager                  // local interface
-    logger      *zap.Logger
-}
-
-// local interfaces — 消費者定義介面 (Go idiom)
-// Only declare methods that this UseCase actually uses
-type orderClient interface {
-    Create(ctx context.Context, req *CreateOrderRequest) (*CreateOrderResponse, error)
-}
-
-type txManager interface {
-    WithTx(ctx context.Context, fn func(ctx context.Context) error) error
-}
-
-func NewCheckoutUseCase(
-    addressSvc service.AddressService,
-    pointsSvc service.PointsService,
-    orderClient orderClient,
-    txManager txManager,
-    logger *zap.Logger,
-) *CheckoutUseCase {
-    return &CheckoutUseCase{
-        addressSvc:  addressSvc,
-        pointsSvc:   pointsSvc,
-        orderClient: orderClient,
-        txManager:   txManager,
-        logger:      logger,
-    }
-}
-
-func (uc *CheckoutUseCase) Execute(ctx context.Context, req *dto.CheckoutRequest) (*dto.CheckoutResponse, error) {
-    addr, err := uc.addressSvc.Get(ctx, req.AddressID)
+    // 2. Cache miss → query Postgres
+    order, err := r.pg.GetByID(ctx, id)
     if err != nil { return nil, err }
 
-    if req.UsePoints > 0 {
-        if err := uc.pointsSvc.Deduct(ctx, req.AccountID, req.UsePoints); err != nil {
-            return nil, err
-        }
-    }
-
-    order, err := uc.orderClient.Create(ctx, &CreateOrderRequest{...})
-    if err != nil { return nil, err }
-
-    return &dto.CheckoutResponse{OrderID: order.ID}, nil
+    // 3. Populate cache
+    r.setCache(ctx, order)
+    return order, nil
 }
 ```
 
-### Service vs UseCase 判斷規則
-
-| 情境 | 放哪裡 | 範例 |
-|------|--------|------|
-| 單一 Aggregate 的 CRUD | **Service** | `AddressService.Create/Update/Delete` |
-| 可被多個 UseCase 重用的邏輯 | **Service** | `PointsService.GetBalance` |
-| 跨多個 Service 的流程編排 | **UseCase** | `CheckoutUseCase`（地址+積分+訂單）|
-| 涉及外部服務呼叫 | **UseCase** | `GoogleOAuthUseCase`（呼叫 Google API）|
-| 複雜的狀態機流程 | **UseCase** | `CertificationUseCase`（認證審核流程）|
-
-### 簡單 Service 可省略 UseCase
-
-如果業務邏輯簡單（純 CRUD，無跨服務流程），gRPC Handler 可直接呼叫 Service：
+DI wiring with decorator:
 
 ```go
-// internal/grpc/address_handler.go
-type AddressHandler struct {
-    addressSvc service.AddressService  // 直接依賴 Service
-}
+// internal/repository/di.go — aggregates postgres + redis sub-modules
+var Module = fx.Module("repository",
+    postgres.Module,               // provides concrete Postgres impls
+    fx.Provide(
+        fx.Annotate(redis.NewOrderRedisProxy, fx.As(new(domain.OrderRepository))),
+    ),
+)
+```
 
-func (h *AddressHandler) ListAddresses(ctx context.Context, req *pb.ListAddressesRequest) (*pb.ListAddressesResponse, error) {
-    addresses, err := h.addressSvc.List(ctx, req.AccountId)
-    // ...
+### Architecture Guard (.go-arch-lint.yml)
+
+Enforce layer dependency rules to prevent architecture erosion:
+
+```yaml
+# .go-arch-lint.yml
+allow:
+  domain: []                          # domain depends on nothing
+  usecase: [domain]                   # usecase only depends on domain
+  repository: [domain]               # repository implements domain interfaces
+  infrastructure: [domain, usecase]  # infra can depend on domain + usecase
+  client: [domain]                    # client adapts external to domain
+  grpc: [domain, usecase]            # grpc calls usecase
+  worker: [domain, usecase]          # worker calls usecase
+  app: [domain, usecase, repository, infrastructure, client, grpc, worker]
+```
+
+Run: `go-arch-lint check --project-path .`
+
+### UseCase vs Domain Service
+
+| Layer | Location | 職責 | 依賴 |
+|-------|----------|------|------|
+| **UseCase** | `internal/usecase/` | 應用程式流程編排（輸入 → 驗證 → 交易 → 存檔 → 通知）| Repository Interface, Client, Domain Service |
+| **Domain Service** | `internal/domain/service/` | 純領域規則（手續費算法、風險判定、跨 Entity 業務邏輯）| 零外部依賴，透過參數傳入資料或注入 Repository Interface |
+
+**關鍵區分**：
+- **UseCase** 關注「應用程式流程」— 協調 Repository、Client、Domain Service 完成一個完整業務流程
+- **Domain Service** 關注「領域規則」— 純業務邏輯計算，不包含 DB 操作或 HTTP 呼叫
+- UseCase 呼叫 Domain Service，但 Domain Service **不呼叫** UseCase
+
+```go
+// internal/domain/service/fee_calculator.go
+// Domain Service — 純業務邏輯，零外部依賴
+type FeeCalculator struct{}
+
+func (fc *FeeCalculator) Calculate(order *domain.Order, rules []domain.FeeRule) domain.Money {
+    // 純計算邏輯，資料透過參數傳入
 }
 ```
 
-**Rule**: 只有當需要**組合多個 Services** 或**複雜流程編排**時，才建立 UseCase。
+```go
+// internal/usecase/create_order.go
+// UseCase — 應用程式流程編排
+type CreateOrderUseCase struct {
+    orderRepo    domain.OrderRepository      // 注入 Repository Interface
+    feeCalc      *domainservice.FeeCalculator // 注入 Domain Service
+    payClient    paymentClient                // consumer-defined local interface
+    txManager    txManager                    // consumer-defined local interface
+    logger       *zap.Logger
+}
+
+func (uc *CreateOrderUseCase) Execute(ctx context.Context, req *dto.CreateOrderRequest) (*dto.CreateOrderResponse, error) {
+    // 1. 查詢資料
+    rules, err := uc.orderRepo.ListFeeRules(ctx)
+    if err != nil { return nil, err }
+
+    // 2. 調用 Domain Service 計算（純邏輯）
+    fee := uc.feeCalc.Calculate(req.ToOrder(), rules)
+
+    // 3. 交易 + 存檔
+    err = uc.txManager.WithTx(ctx, func(txCtx context.Context) error {
+        return uc.orderRepo.Create(txCtx, order)
+    })
+    if err != nil { return nil, err }
+
+    // 4. 呼叫外部服務
+    _, err = uc.payClient.Charge(ctx, &ChargeRequest{Amount: fee})
+    return &dto.CreateOrderResponse{OrderID: order.ID}, err
+}
 
 ### DTO Organization Pattern
 
@@ -278,57 +262,63 @@ usecase/dto/
 ## Monorepo Structure
 
 ```
-project-root/
-├── api/                                # API definitions
-│   └── proto/                          # Protocol Buffers source files
-│       ├── account/account.proto
-│       ├── merchant/merchant.proto
-│       └── common/{pagination,money}.proto
+project-root/                            # 📦 Monorepo 根目錄
+├── go.mod                               # 🌍 Workspace / Root Module
+├── buf.work.yaml                        # 🌍 Buf Workspace 設定
+├── Makefile                             # 🛠️ 全域指令 (make dev-up, make lint)
+├── docker-compose.yaml                  # 🐳 本地開發 (Infra + Services + LGTM)
+├── .env                                 # 🔐 環境變數 (給 docker-compose)
 │
-├── pkg/                                # Shared Go packages (single go.mod)
-│   ├── go.mod                          # module github.com/yourproject/go-pkg
-│   ├── proto/                          # Generated proto Go code
-│   │   ├── account/                    # github.com/yourproject/go-pkg/proto/account
-│   │   ├── merchant/
-│   │   └── ...
-│   ├── config/                         # Native os.Getenv + struct
-│   ├── logger/                         # Zap + Log Schema
-│   ├── errors/                         # ErrorCode + DomainError interface
-│   ├── database/                       # PG connection + GetDBTX
-│   ├── middleware/                     # gRPC Interceptors
-│   ├── mq/                             # RabbitMQ connection + trace propagation
-│   ├── redis/                          # Redis client + idempotency
-│   ├── cache/                          # Cache + singleflight
-│   └── circuitbreaker/                 # Circuit breaker
+├── monitoring/                          # 🔭 可觀測性設定中心
+│   ├── grafana/                         # 📊 Grafana Dashboards & Datasources
+│   ├── prometheus/                      # 📈 Prometheus 設定 (Metrics)
+│   ├── loki/                            # 🪵 Loki 設定 (Logs)
+│   ├── tempo/                           # ⏱️ Tempo 設定 (Traces)
+│   └── otel-collector/                  # 📡 OpenTelemetry Collector (資料轉運站)
 │
-├── services/                           # Individual microservices
-├── gateway/                            # API Gateway
-├── scripts/                            # Build/deploy scripts
-├── deploy/                             # K8s manifests, docker-compose
-└── Makefile                            # Root-level commands
+├── pkg/                                 # 🧱 全域共用基建 (shared library)
+│   ├── config/                          # ⚙️ 統一 Config (Viper)
+│   ├── database/                        # 🗄️ 統一 Postgres 連線池設定
+│   ├── redis/                           # ⚡ 統一 Redis Client & Lock
+│   ├── logger/                          # 📝 統一 Zap/Slog 格式
+│   ├── errors/                          # ❌ 全域錯誤碼 (Domain Errors)
+│   ├── middleware/                      # 🛡️ gRPC/HTTP Interceptor (Auth, Trace, Log)
+│   ├── otel/                            # 🔍 Tracing 初始化封裝
+│   ├── twaddr/                          # 📮 [通用業務] 台灣地址解析
+│   └── payuni/                          # 💳 [通用業務] PayUni SDK 封裝
+│
+├── api/                                 # 📋 介面合約
+│   ├── proto/
+│   │   ├── merchant/                    # merchant.proto (Source)
+│   │   └── common/                      # Shared proto (pagination, money)
+│   └── openapi/                         # 自動生成的 Swagger JSON
+│
+└── services/                            # 🏭 微服務群
+    ├── merchant-service/                # 各服務 (見 Single Service 結構)
+    └── (future-service)/                # 未來的其他服務
 ```
 
-> **Proto Convention**: Proto source files live in `api/proto/`. Generated Go code lives in `pkg/proto/`.
-> Services import via `github.com/yourproject/go-pkg/proto/<domain>` and use `replace` directive for local development:
-> ```go
-> // services/xxx-service/go.mod
-> replace github.com/yourproject/go-pkg => ../../pkg
-> ```
+> **Key Monorepo Conventions**:
+> - Root `go.mod` acts as workspace — all services share dependencies
+> - `buf.work.yaml` at root orchestrates per-service buf configs
+> - `pkg/` at root level (not nested) — shared across all services
+> - `monitoring/` centralizes all observability configs (Grafana, Prometheus, Loki, Tempo, OTel Collector)
+> - Each service has its own `buf.yaml` + `buf.gen.yaml` for proto generation (Go + Gateway + Swagger)
+> - Proto source files live in `api/proto/`, generated code goes to service-local or `api/openapi/`
 
 ## Shared Packages (pkg)
 
 | Package | Responsibility | Stage |
 |---------|---------------|-------|
-| `config` | `os.Getenv` + struct config | MVP |
-| `logger` | Zap + Log Schema | MVP |
-| `ctxutil` | correlation_id / request_id propagation | MVP |
-| `errors` | ErrorCode + DomainError interface (contract) | MVP |
-| `database` | PG connection pool + `GetDBTX` helper | MVP |
-| `sqlutil` | pgtype nullable type helpers (Text, Int4, Timestamptz, etc.) | MVP |
-| `mapper` | Manual mapping utilities | MVP |
-| `middleware/grpc/interceptor` | gRPC Interceptor chain | MVP |
-| `observability` | OTel tracing setup | MVP |
-| `auth/jwt` | JWT validation | MVP |
+| `config` | 統一 Config (Viper-based) | MVP |
+| `logger` | 統一 Zap/Slog 格式 | MVP |
+| `errors` | 全域錯誤碼 + DomainError interface | MVP |
+| `database` | 統一 Postgres 連線池設定 | MVP |
+| `redis` | 統一 Redis Client & Lock | MVP |
+| `middleware` | gRPC/HTTP Interceptor (Auth, Trace, Log) | MVP |
+| `otel` | Tracing 初始化封裝 | MVP |
+| `twaddr` | [通用業務] 台灣地址解析 | MVP |
+| `payuni` | [通用業務] PayUni SDK 封裝 | MVP |
 | `cache` | Generic CacheLoader + singleflight | Async |
 | `circuitbreaker` | gobreaker wrapper | Async |
 | `mq/rabbitmq` | MQ connection + trace propagation | Async |
@@ -336,6 +326,8 @@ project-root/
 | `saga` | Saga timeout monitor | Async |
 
 **Why `ErrorCode` lives in `pkg/errors` instead of `internal/domain`**: Avoids circular dependency. `pkg/errors` defines the `ErrorCode` type and `DomainError` interface. Domain layer imports it to implement; Interceptor imports it to map. `pkg/errors` contains only pure constants and interfaces — no runtime or transport protocol dependencies.
+
+**Business-specific shared packages** (`twaddr`, `payuni`): These contain reusable business logic shared across services. They follow the same zero-side-effect principle as infrastructure packages.
 
 ## Naming Conventions
 
@@ -402,13 +394,12 @@ Uber Fx wires all layers together. Each package contains its own `di.go` with a 
 
 ```
 internal/
+├── domain/
+│   └── service/                  # Domain Service (純業務邏輯, zero deps)
 ├── usecase/
 │   ├── create_order.go
 │   ├── cancel_order.go
 │   └── di.go                     # var Module = fx.Module("usecase", ...)
-├── service/
-│   ├── address_service.go
-│   └── di.go                     # var Module = fx.Module("service", ...)
 ├── repository/
 │   ├── postgres/
 │   │   ├── order.go
@@ -464,7 +455,6 @@ import (
     "github.com/yourproject/order-service/internal/config"
     "github.com/yourproject/order-service/internal/grpc"
     "github.com/yourproject/order-service/internal/repository"
-    "github.com/yourproject/order-service/internal/service"
     "github.com/yourproject/order-service/internal/usecase"
 )
 
@@ -479,7 +469,6 @@ func New() *fx.App {
         client.Module,
 
         // Layer 3: Business logic
-        service.Module,
         usecase.Module,
 
         // Layer 4: Interface (gRPC server)
@@ -504,7 +493,7 @@ func run(lifecycle fx.Lifecycle, srv *grpc.Server) {
 ```
 
 ```go
-// cmd/server/main.go
+// cmd/order-service/main.go
 package main
 
 import "github.com/yourproject/order-service/internal/app"
@@ -631,7 +620,6 @@ app.go → fx.New()
   ├─ repository.Module
   │   └─ postgres.Module        → *pgxpool.Pool, domain.OrderRepository (impl)
   ├─ client.Module              → *PaymentClient, *InventoryClient
-  ├─ service.Module             → service.AddressService, service.PointsService
   ├─ usecase.Module             → *CreateOrderUseCase, *CancelOrderUseCase
   ├─ grpc.Module                → *Handler, *Server (+ fx.Invoke registers to grpc.Server)
   └─ fx.Invoke(run)             → Lifecycle hooks (start/stop server)
@@ -646,22 +634,35 @@ Fx detects circular dependencies at startup with clear error messages. Fix by:
 
 ## Proto / buf Tooling
 
-### Directory Structure
+### Directory Structure (Buf Workspace)
 
 ```
-api/proto/
-├── buf.yaml              # Module config (lint + breaking rules)
-├── buf.gen.yaml          # Code generation config
-├── common/v1/
-│   ├── pagination.proto  # Shared pagination messages
-│   └── money.proto       # Shared Money value object
-├── order/v1/
-│   └── order_service.proto
-└── inventory/v1/
-    └── inventory_service.proto
+project-root/
+├── buf.work.yaml              # 🌍 Root Buf Workspace (references all services)
+│
+├── api/proto/                 # 📋 Proto source files
+│   ├── merchant/
+│   │   └── merchant.proto
+│   └── common/
+│       ├── pagination.proto
+│       └── money.proto
+│
+└── services/
+    └── merchant-service/
+        ├── buf.yaml           # 🔧 Per-service Buf module config
+        └── buf.gen.yaml       # 🔧 Per-service code generation (Go + Gateway + Swagger)
 ```
 
-### buf.yaml
+### buf.work.yaml (Root)
+
+```yaml
+version: v1
+directories:
+  - api/proto
+  - services/merchant-service
+```
+
+### buf.yaml (Per-Service)
 
 ```yaml
 version: v2
@@ -678,7 +679,7 @@ breaking:
     - WIRE_JSON               # Detect wire-format breaking changes
 ```
 
-### buf.gen.yaml
+### buf.gen.yaml (Per-Service, generates Go + Gateway + Swagger)
 
 ```yaml
 version: v2
@@ -689,6 +690,13 @@ plugins:
   - remote: buf.build/grpc/go
     out: gen/go
     opt: paths=source_relative
+  # HTTP Gateway (grpc-gateway)
+  - remote: buf.build/grpc-ecosystem/gateway
+    out: gen/go
+    opt: paths=source_relative
+  # Swagger/OpenAPI documentation
+  - remote: buf.build/grpc-ecosystem/openapiv2
+    out: ../../api/openapi
 ```
 
 ### Proto Design Conventions
@@ -739,109 +747,178 @@ message ListOrdersRequest {
 
 ## Local Development Environment
 
-### Docker Compose
+### Multi-Stage Dockerfile (Dev + Prod)
+
+Each service has a Dockerfile supporting both development (with Air hot-reload) and production (minimal image):
+
+```dockerfile
+# services/xxx-service/Dockerfile
+
+# === Stage 1: Base ===
+FROM golang:1.23-alpine AS base
+WORKDIR /app
+RUN apk add --no-cache git
+# Monorepo: copy root go.mod for dependency caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# === Stage 2: Dev (with Air hot-reload) ===
+FROM base AS dev
+RUN go install github.com/air-verse/air@latest
+RUN go install github.com/go-delve/delve/cmd/dlv@latest  # debugger (optional)
+COPY . .
+CMD ["air", "-c", "services/xxx-service/.air.toml"]
+
+# === Stage 3: Builder (production build) ===
+FROM base AS builder
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /server services/xxx-service/cmd/xxx-service/main.go
+
+# === Stage 4: Production (minimal image) ===
+FROM alpine:latest AS prod
+WORKDIR /root/
+COPY --from=builder /server .
+CMD ["./server"]
+```
+
+**Key**: Build context is the monorepo root (not the service dir) so it can access `go.mod` and `pkg/`.
+
+### Air Configuration (.air.toml)
+
+```toml
+# services/xxx-service/.air.toml
+root = "."
+tmp_dir = "tmp"
+
+[build]
+# Path from monorepo root (Docker WORKDIR is /app)
+cmd = "go build -o ./tmp/main services/xxx-service/cmd/xxx-service/main.go"
+bin = "./tmp/main"
+include_ext = ["go", "tpl", "tmpl", "html"]
+exclude_dir = ["assets", "tmp", "vendor", "test"]
+
+[log]
+time = true
+```
+
+### Docker Compose (Infrastructure + Services + LGTM)
 
 ```yaml
-# docker-compose.yml
+# docker-compose.yaml
 services:
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports: ["5432:5432"]
+  # =========================================
+  # 🏭 1. Microservices
+  # =========================================
+  merchant-service:
+    build:
+      context: .                    # Monorepo root (for go.mod + pkg/)
+      dockerfile: services/merchant-service/Dockerfile
+      target: dev                   # Use dev stage (Air hot-reload)
     volumes:
-      - pg-data:/var/lib/postgresql/data
-      - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh  # Create per-service DBs
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      - .:/app                      # Mount source for hot-reload
+    ports:
+      - "8080:8080"                 # HTTP Gateway
+      - "9090:9090"                 # gRPC
+    environment:
+      - APP_ENV=dev
+      - DB_SOURCE=postgresql://user:pass@postgres:5432/payuni?sslmode=disable
+      - REDIS_ADDR=redis:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    depends_on:
+      - postgres
+      - redis
+      - otel-collector
+
+  # =========================================
+  # 🏗️ 2. Infrastructure
+  # =========================================
+  postgres:
+    image: postgres:15-alpine
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: payuni
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
   redis:
-    image: redis:8-alpine
+    image: redis:7-alpine
     ports: ["6379:6379"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
 
-  rabbitmq:
-    image: rabbitmq:4-management-alpine
-    ports:
-      - "5672:5672"    # AMQP
-      - "15672:15672"  # Management UI
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASSWORD: guest
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
-      interval: 10s
-
-  # Observability stack (optional, enable when needed)
+  # =========================================
+  # 🔭 3. Observability (LGTM Stack)
+  # =========================================
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
-      - ./deploy/otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
-    ports: ["4317:4317"]   # gRPC OTLP
+      - ./monitoring/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports: ["4317:4317", "4318:4318", "8888:8888"]
 
-  tempo:
-    image: grafana/tempo:latest
-    ports: ["3200:3200"]
+  prometheus:
+    image: prom/prometheus:latest
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports: ["9091:9090"]
 
   loki:
     image: grafana/loki:latest
+    command: -config.file=/etc/loki/local-config.yaml
     ports: ["3100:3100"]
+
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./monitoring/tempo/tempo-config.yaml:/etc/tempo.yaml
+    ports: ["3200:3200"]
 
   grafana:
     image: grafana/grafana:latest
     ports: ["3000:3000"]
     environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
 
 volumes:
-  pg-data:
+  postgres_data:
 ```
 
-### init-db.sh (Per-Service Database Setup)
+### Monitoring Directory Structure
 
-```bash
-#!/bin/bash
-set -e
-
-# Create database and user for each service
-create_service_db() {
-    local service=$1
-    local db="${service}_db"
-    local user="${service}_svc"
-    local password="${service}_password"  # Use secrets in production
-
-    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
-        CREATE USER ${user} WITH PASSWORD '${password}';
-        CREATE DATABASE ${db} OWNER ${user};
-        REVOKE ALL ON DATABASE ${db} FROM PUBLIC;
-        GRANT CONNECT ON DATABASE ${db} TO ${user};
-EOSQL
-}
-
-create_service_db "order"
-create_service_db "inventory"
-create_service_db "wallet"
+```
+monitoring/
+├── grafana/
+│   └── provisioning/          # Datasources + Dashboards auto-provisioning
+├── prometheus/
+│   └── prometheus.yml         # Scrape config
+├── loki/
+│   └── local-config.yaml
+├── tempo/
+│   └── tempo-config.yaml
+└── otel-collector/
+    └── otel-collector-config.yaml   # OTLP receivers → exporters
 ```
 
 ### Makefile Targets
 
 ```makefile
-# Local development workflow
-.PHONY: infra-up infra-down migrate-all generate test
+.PHONY: dev-up dev-down migrate-all generate test lint
 
+# Start everything (infra + observability + services)
+dev-up:
+	docker compose up -d
+
+# Start only infrastructure
 infra-up:
-	docker compose up -d postgres redis rabbitmq
-	@echo "Waiting for services..."
-	@sleep 3
+	docker compose up -d postgres redis
 
-infra-down:
+# Stop everything
+dev-down:
 	docker compose down
 
 migrate-all:
@@ -849,7 +926,7 @@ migrate-all:
 		if [ -d "$$dir/db/migrations" ]; then \
 			echo "Migrating $$(basename $$dir)..."; \
 			atlas migrate apply --dir "file://$$dir/db/migrations" \
-				--url "postgres://...$$(basename $$dir)_db?sslmode=disable"; \
+				--url "postgres://...?sslmode=disable"; \
 		fi; \
 	done
 
@@ -862,21 +939,27 @@ generate:
 		fi; \
 	done
 
+lint:
+	golangci-lint run ./...
+	buf lint
+	go-arch-lint check
+
 test:
 	go test ./... -race -cover -count=1
 
-dev-%:  ## Run a specific service: make dev-order
-	go run ./services/$*-service/cmd/server/main.go
+dev-%:  ## Run a specific service locally: make dev-merchant
+	go run ./services/$*-service/cmd/$*-service/main.go
 ```
 
 ### Development Workflow
 
-1. `make infra-up` — Start PG + Redis + RabbitMQ
+1. `make dev-up` — Start all (Infra + LGTM + Services with Air hot-reload)
 2. `make migrate-all` — Apply all migrations
 3. `make generate` — Generate Proto + sqlc code
-4. `make dev-order` — Run a specific service locally
-5. Services connect to `localhost:5432`, `localhost:6379`, `localhost:5672`
-6. For full observability stack: `docker compose --profile observability up -d`
+4. Edit code → Air auto-rebuilds and restarts the service
+5. View traces at `http://localhost:3000` (Grafana → Tempo)
+6. View logs at `http://localhost:3000` (Grafana → Loki)
+7. View metrics at `http://localhost:3000` (Grafana → Prometheus)
 
 ## Scheduled Jobs
 

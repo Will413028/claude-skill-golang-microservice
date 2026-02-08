@@ -2,6 +2,9 @@
 
 ## Table of Contents
 
+- [Dual Protocol Support](#dual-protocol-support)
+- [Docker & Container Strategy](#docker--container-strategy)
+- [Monitoring Infrastructure](#monitoring-infrastructure)
 - [Observability](#observability)
 - [Graceful Shutdown `[Hardening]`](#graceful-shutdown-hardening)
 - [Alert Rules `[Hardening]`](#alert-rules-hardening)
@@ -9,6 +12,117 @@
 - [CI/CD Pipeline](#cicd-pipeline)
 - [gRPC Health Check Service `[Hardening]`](#grpc-health-check-service-hardening)
 - [Kubernetes Deployment `[Infrastructure]`](#kubernetes-deployment-infrastructure)
+
+## Dual Protocol Support
+
+Each service exposes both gRPC and HTTP, sharing the same UseCase logic:
+
+```
+Frontend/External ─── HTTP Gateway (Gin / grpc-gateway) ──┐
+                                                           ├── UseCase
+Internal Services ─── gRPC (high efficiency) ──────────────┘
+```
+
+| Protocol | Port | Purpose | Consumers |
+|----------|------|---------|-----------|
+| HTTP | Even (e.g., 8080) | REST API for frontend, external clients | Web app, mobile, third-party |
+| gRPC | HTTP+1 (e.g., 8081) | Internal service-to-service communication | Other microservices |
+
+**Implementation**: The gRPC handler and HTTP controller both call the same UseCase. No business logic duplication. HTTP Gateway can be implemented via:
+- **grpc-gateway**: Auto-generate HTTP endpoints from proto annotations (preferred for internal APIs)
+- **Gin controllers**: Manual HTTP handlers calling UseCase directly (preferred for customer-facing APIs with custom response formats)
+
+## Docker & Container Strategy
+
+### Multi-Stage Dockerfile
+
+See [architecture.md → Multi-Stage Dockerfile](architecture.md#multi-stage-dockerfile-dev--prod) for the complete Dockerfile template.
+
+Key points:
+- Build context must be monorepo root (for `go.mod` and `pkg/` access)
+- `target: dev` for local development with Air hot-reload
+- `target: prod` for production with minimal Alpine image
+- CGO_ENABLED=0 for static binary (no libc dependency)
+
+### Docker Compose Service Configuration
+
+Each microservice in docker-compose:
+
+```yaml
+merchant-service:
+  build:
+    context: .                          # Monorepo root
+    dockerfile: services/merchant-service/Dockerfile
+    target: dev                         # Dev stage with Air
+  volumes:
+    - .:/app                            # Mount source for hot-reload
+  ports:
+    - "8080:8080"                       # HTTP
+    - "9090:9090"                       # gRPC
+  environment:
+    - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+  depends_on:
+    - postgres
+    - redis
+    - otel-collector
+```
+
+## Monitoring Infrastructure
+
+All observability configuration lives in `monitoring/` at the monorepo root:
+
+```
+monitoring/
+├── grafana/
+│   └── provisioning/
+│       ├── datasources/               # Auto-provision Loki, Tempo, Prometheus
+│       └── dashboards/                # Pre-built dashboards
+├── prometheus/
+│   └── prometheus.yml                 # Scrape targets
+├── loki/
+│   └── local-config.yaml
+├── tempo/
+│   └── tempo-config.yaml
+└── otel-collector/
+    └── otel-collector-config.yaml     # OTLP receivers → exporters
+```
+
+### OTel Collector Config
+
+The collector acts as a central data router — receives OTLP from all services, forwards to appropriate backends:
+
+```yaml
+# monitoring/otel-collector/otel-collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+```
 
 ## Observability
 

@@ -27,7 +27,12 @@ built on Clean Architecture + gRPC + PostgreSQL + RabbitMQ.
 | Cache | Redis 8 |
 | Message Queue | RabbitMQ |
 | Object Storage | MinIO |
-| Container | Docker Compose → Kubernetes |
+| Hot Reload | Air (development) |
+| Container | Docker Compose (multi-stage Dockerfile) → Kubernetes |
+| Observability | Grafana LGTM (Loki + Grafana + Tempo + Prometheus) |
+| Telemetry Collector | OpenTelemetry Collector |
+| Proto Management | Buf (workspace + lint + breaking) |
+| Architecture Guard | go-arch-lint (architecture enforcement) |
 | Dependency Injection | Uber Fx |
 | Configuration | Native `os.Getenv` + struct |
 | Logging | Zap (JSON stdout) |
@@ -43,15 +48,14 @@ built on Clean Architecture + gRPC + PostgreSQL + RabbitMQ.
 Dependency direction (inward only): outer layers → inner layers
 
 internal/
-├── domain/           # Entity, Value Object, Repository Interface, Domain Event (zero external deps)
-├── service/          # Reusable business logic (cross-UseCase)
-├── usecase/          # Orchestration + DTO + transactions (consumer-defined local interfaces)
-├── repository/postgres/  # Repository Impl + gen/ (sqlc) + mapper.go
-├── client/           # External gRPC clients (by service name)
-├── grpc/             # gRPC Handler (server.go + handler + mapper)
-├── consumer/         # MQ Consumer (Async stage)
-├── config/           # Config struct + DI module
-└── app/              # Assembles all fx.Modules
+├── domain/           # 🏛️ 核心層: Entity, Value Object, Repository Interface, Domain Event (zero external deps)
+├── usecase/          # 🎯 應用層: Orchestration + DTO + transactions (consumer-defined local interfaces)
+├── repository/       # 💾 資料存取層: postgres/ (sqlc + impl) + redis/ (cache decorator)
+├── infrastructure/   # 🏗️ 基建層: Server setup, external infra adapters (Address, etc.)
+├── client/           # 🌐 外部適配: External service adapters (PayUni, gRPC clients)
+├── grpc/             # 📡 傳輸層: gRPC Handler (server.go + handler + mapper)
+├── worker/           # ⚙️ 背景任務: Outbox Publisher, async workers
+└── app/              # 🧩 組裝層: Assembles all fx.Modules (Wiring)
 ```
 
 **Domain Layer is the stable core across all stages** — Entity, Value Object, and state machines
@@ -59,8 +63,16 @@ never change due to infrastructure changes. UseCase orchestration signatures rem
 only internal implementations evolve with each stage.
 
 **Go-style flat directories** — No `adapter/inbound/outbound/` or `application/port/input/output/`.
-Each package is named by its concern (`grpc/`, `repository/postgres/`, `client/`).
+Each package is named by its concern (`grpc/`, `repository/`, `client/`).
 UseCase uses consumer-defined local interfaces for its dependencies (Go idiom).
+
+**Cache Decorator Pattern** — UseCase only calls Repository interface. A `RepoRedis` proxy
+intercepts requests, checking Redis first before falling through to Postgres. This keeps
+business logic completely clean of caching concerns.
+
+**Dual Protocol Support** — gRPC for internal service-to-service communication (high efficiency),
+HTTP Gateway (via grpc-gateway or Gin) for frontend/external calls. Both share the same
+UseCase logic — no duplication.
 
 ## Stage Evolution Overview
 
@@ -77,10 +89,12 @@ Every new project follows these four stages. Determine the current stage to deci
 
 1. **Architecture skeleton** → Read [references/architecture.md](references/architecture.md)
    - Flat Go-style directory structure + naming conventions
-   - Monorepo structure (shared `go.mod`; evaluate `go.work` when services > 5–8)
+   - Monorepo structure (root `go.mod` workspace, `buf.work.yaml` at root; evaluate `go.work` when services > 5–8)
    - **Uber Fx DI** (`var Module = fx.Module(...)` per package, `fx.Annotate` + `fx.As` for interface binding, assembled in `app/app.go`)
-   - **Proto / buf tooling** (`buf.yaml`, `buf.gen.yaml`, Proto design conventions, `buf lint` + `buf breaking`)
-   - **Local dev environment** (Docker Compose: PG + Redis + RabbitMQ + init-db.sh + Makefile)
+   - **Proto / buf tooling** (`buf.work.yaml` at root, per-service `buf.yaml` + `buf.gen.yaml`, generates Go + Gateway + Swagger)
+   - **Local dev environment** (Docker Compose: PG + Redis + MQ + LGTM observability + Makefile)
+   - **Multi-stage Dockerfile** (dev with Air hot-reload + prod with minimal alpine image)
+   - **Architecture guard** (`.go-arch-lint.yml` for layer dependency enforcement)
 
 2. **Domain design** → Read [references/domain-layer.md](references/domain-layer.md)
    - Entity state machine (whitelist transitions + inject `now time.Time`)
@@ -209,7 +223,10 @@ Every new project follows these four stages. Determine the current stage to deci
 | Directory structure + Monorepo | ✅ Must | — | — | Evaluate `go.work` |
 | Uber Fx Module Wiring | ✅ Must | — | — | — |
 | Proto / buf Tooling | ✅ Must | — | — | — |
-| Local Dev (Docker Compose) | ✅ Must | — | — | — |
+| Multi-stage Dockerfile (Air dev + prod) | ✅ Must | — | — | — |
+| Local Dev (Docker Compose + LGTM) | ✅ Must | — | — | — |
+| Architecture Guard (go-arch-lint) | ✅ Must | — | — | — |
+| Cache Decorator Pattern | — | ✅ Must | — | — |
 | Naming conventions | ✅ Must | — | — | — |
 | Error handling (DomainError + Interceptor) | ✅ Must | — | — | — |
 | Domain Layer (Entity + VO + Repo Interface) | ✅ Must | — | — | — |
@@ -258,16 +275,23 @@ These can wait beyond MVP without significant risk:
 
 ### New Service Checklist
 
-1. Create directory structure (per architecture.md): `domain/`, `usecase/`, `service/`, `repository/postgres/`, `grpc/`, `client/`, `config/`, `app/`
-2. Define Proto (`proto/{service}/`)
-3. Design Domain Layer: Entity (`domain/{entity}.go`) + Enums (`domain/{entity}_types.go`) + Value Object (`domain/valueobject/`) + Repository Interface (bottom of Entity file)
-4. Implement Service Layer (`service/`) for reusable business logic
-5. Implement UseCase Layer (`usecase/`) with DTOs (`usecase/dto/`) and consumer-defined local interfaces
-6. Implement Repository (`repository/postgres/`) with mapper.go + di.go
-7. Implement gRPC Handler (`grpc/`) with mapper.go + di.go
-8. Configure DI: each package has `di.go` with `var Module = fx.Module(...)`, assembled in `app/app.go`
-9. Write Schema (`db/schema/`) + Queries (`db/queries/`) → `sqlc generate` → `repository/postgres/gen/`
-10. Write tests (unit + integration)
+1. Create directory structure (per architecture.md):
+   - `cmd/{service-name}/main.go` — entry point with DI
+   - `internal/`: `domain/`, `usecase/`, `repository/`, `infrastructure/`, `client/`, `grpc/`, `worker/`, `app/`
+   - `db/`: `migrations/`, `schema.hcl`, `query.sql`
+   - `test/` — integration tests, mocks
+2. Setup per-service buf: `buf.yaml` + `buf.gen.yaml` (generates Go + Gateway + Swagger)
+3. Setup `.air.toml` for hot-reload development
+4. Setup `.go-arch-lint.yml` for architecture enforcement
+5. Define Proto in `api/proto/{service}/`
+6. Design Domain Layer: Entity (`domain/{entity}.go`) + Enums (`domain/{entity}_types.go`) + Value Object (`domain/valueobject/`) + Repository Interface (bottom of Entity file)
+7. Implement UseCase Layer (`usecase/`) with DTOs and consumer-defined local interfaces
+8. Implement Repository: `repository/postgres/` (impl + mapper.go + gen/) + `repository/redis/` (cache decorator, optional) + `repository/di.go`
+9. Implement gRPC Handler (`grpc/`) with mapper.go + di.go
+10. Configure DI: each package has `di.go` with `var Module = fx.Module(...)`, assembled in `app/app.go`
+11. Write Schema (`db/schema.hcl`) + Queries (`db/query.sql`) → `sqlc generate`
+12. Create multi-stage Dockerfile (dev + prod targets)
+13. Write tests (unit + integration)
 
 ### Sync vs Async Saga
 
