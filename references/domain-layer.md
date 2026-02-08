@@ -17,17 +17,18 @@ Use **DTO (Data Transfer Object)** naming for application layer input/output.
 
 | Layer | Object Type | Location | Description |
 |-------|-------------|----------|-------------|
-| **Domain** | `Entity` | `domain/entity/` | Pure business logic, no DB tags |
+| **Domain** | `Entity` | `domain/{entity}.go` | Pure business logic, no DB tags |
 | **Domain** | `ValueObject` | `domain/valueobject/` | Immutable, equality by value |
-| **Domain** | `Enum` | `domain/enum/` | Type-safe enums (enumer generated) |
-| **Application** | `Request DTO` | `application/dto/request/` | UseCase input |
-| **Application** | `Response DTO` | `application/dto/response/` | UseCase output |
-| **Adapter** | `sqlc struct` | `sqlcgen/` | Auto-generated, DB mapping |
+| **Domain** | `Enum` | `domain/{entity}_types.go` | Type-safe enums (co-located with Entity) |
+| **Domain** | `Repository Interface` | `domain/{entity}.go` (bottom) | Interface only, co-located with Entity |
+| **Application** | `Request DTO` | `usecase/dto/{feature}_req.go` | UseCase input |
+| **Application** | `Response DTO` | `usecase/dto/{feature}_res.go` | UseCase output |
+| **Repository** | `sqlc struct` | `repository/postgres/gen/` | Auto-generated (DO NOT EDIT) |
 
 ### Data Flow
 
 ```
-gRPC Request → Handler → Request DTO → UseCase → Entity ← Repository ← sqlc struct
+gRPC Request → Handler → Request DTO → UseCase → Entity ← Repository ← gen.Model
                                            ↓
                              Response DTO ← UseCase
                                            ↓
@@ -38,11 +39,12 @@ gRPC Request → Handler → Request DTO → UseCase → Entity ← Repository �
 
 | From | To | Where |
 |------|----|-------|
-| `pb.Request` | `request.DTO` | Handler (Mapper) |
-| `request.DTO` | `Entity` | UseCase |
-| `sqlc.Row` | `Entity` | Repository (`toEntity()`) |
-| `Entity` | `response.DTO` | UseCase |
-| `response.DTO` | `pb.Response` | Handler (Mapper) |
+| `pb.Request` | `dto.XxxRequest` | gRPC Handler (`mapper.go`) |
+| `dto.XxxRequest` | `domain.Entity` | UseCase |
+| `gen.Model` | `domain.Entity` | Repository (`mapper.go` → `toDomain()`) |
+| `domain.Entity` | `gen.XxxParams` | Repository (`mapper.go` → `toCreateParams()`) |
+| `domain.Entity` | `dto.XxxResponse` | UseCase |
+| `dto.XxxResponse` | `pb.Response` | gRPC Handler (`mapper.go`) |
 
 ## Entity State Machine
 
@@ -141,7 +143,7 @@ func (m Money) Multiply(quantity int) Money {
 
 ## Type-Safe Enums with Enumer
 
-Use [enumer](https://github.com/dmarkham/enumer) to generate type-safe enum methods. Enums live in a dedicated `domain/enum/` package, separate from entities and value objects.
+Use [enumer](https://github.com/dmarkham/enumer) to generate type-safe enum methods. Enums are **co-located with their Entity** in `domain/{entity}_types.go`, keeping high cohesion.
 
 ### Installation
 
@@ -152,22 +154,29 @@ go install github.com/dmarkham/enumer@latest
 ### Directory Layout
 
 ```text
-internal/domain/enum/
-├── order.go                          # Order-related enums (hand-written)
+internal/domain/
+├── order.go                          # Entity + Repository Interface + rich methods
+├── order_types.go                    # Order-related enums (hand-written)
 ├── zzz_enumer_orderStatus.go         # Generated — sorts to bottom
 ├── zzz_enumer_paymentMethod.go       # Generated — sorts to bottom
-├── account.go                        # Account-related enums (hand-written)
-├── zzz_enumer_accountStatus.go       # Generated
-└── zzz_enumer_authProvider.go        # Generated
+├── merchant.go                       # Another entity
+├── merchant_types.go                 # Merchant-related enums
+├── zzz_enumer_merchantType.go        # Generated
+├── valueobject/                      # Value Objects
+├── service/                          # Domain Services
+└── errors.go                         # Domain errors
 ```
 
-**Convention**: Generated files use `zzz_` prefix so they sort to the bottom of file explorers.
+**Convention**:
+- Enum definitions in `{entity}_types.go` (co-located with Entity, same `domain` package)
+- Generated files use `zzz_` prefix so they sort to the bottom of file explorers
+- Repository Interface at the bottom of `{entity}.go`
 
 ### Enum Definition
 
 ```go
-// internal/domain/enum/order.go
-package enum
+// internal/domain/order_types.go
+package domain
 
 //go:generate enumer -type=OrderStatus -trimprefix=OrderStatus -json -text -transform=snake --output=zzz_enumer_orderStatus.go
 type OrderStatus int32
@@ -194,7 +203,7 @@ const (
 **Key points**:
 
 - Enumer only supports `int`-based enums (iota), NOT string-based
-- Group related enums in one file by domain concept (e.g., `order.go` has `OrderStatus` + `PaymentMethod`)
+- Group related enums in `{entity}_types.go` by domain concept (e.g., `order_types.go` has `OrderStatus` + `PaymentMethod`)
 - Use `--output=zzz_enumer_<typeName>.go` for `zzz_` prefix convention
 - Always include `-text` flag (needed for `encoding.TextMarshaler/TextUnmarshaler`)
 
@@ -229,26 +238,27 @@ func (i *OrderStatus) UnmarshalText(data []byte) error // Text deserialization
 
 ### Enum vs Value Object
 
-| Aspect | Enum (`domain/enum/`) | Value Object (`domain/valueobject/`) |
+| Aspect | Enum (`domain/{entity}_types.go`) | Value Object (`domain/valueobject/`) |
 | ------ | --------------------- | ------------------------------------- |
 | Behavior | Pure label, no logic | Rich behavior (validation, comparison, arithmetic) |
 | Generation | `enumer` auto-generated methods | Hand-written methods |
-| Example | `AccountStatus`, `AuthProvider` | `Phone` (validation), `Role` (bitmask), `Money` (arithmetic) |
-| Package | Shared across entity/VO/usecase | Domain-internal |
+| Example | `OrderStatus`, `MerchantType` | `Phone` (validation), `Role` (bitmask), `Money` (arithmetic) |
+| Location | Same `domain` package, in `*_types.go` | Sub-package `domain/valueobject/` |
 
-**Rule of thumb**: If the type only has named constants and serialization → `enum/`. If it has validation, arithmetic, or complex equality → `valueobject/`.
+**Rule of thumb**: If the type only has named constants and serialization → `*_types.go`. If it has validation, arithmetic, or complex equality → `valueobject/`.
 
 ### Usage in Repository (without -sql flag)
 
-When using sqlc with `sqlutil` helpers (storing enums as strings in DB), parse in `toEntity()`:
+When using sqlc with `sqlutil` helpers (storing enums as strings in DB), parse in `toDomain()` inside `mapper.go`:
 
 ```go
-func (r *repo) toEntity(row sqlcgen.Order) (*entity.Order, error) {
-    status, err := enum.OrderStatusString(sqlutil.TextValue(row.Status))
+// internal/repository/postgres/mapper.go
+func toDomainOrder(row gen.Order) (*domain.Order, error) {
+    status, err := domain.OrderStatusString(sqlutil.TextValue(row.Status))
     if err != nil {
         return nil, fmt.Errorf("invalid order status: %w", err)
     }
-    return &entity.Order{
+    return &domain.Order{
         Status: status,
         // ...
     }, nil
@@ -260,15 +270,15 @@ func (r *repo) toEntity(row sqlcgen.Order) (*entity.Order, error) {
 With `-sql` flag, enums work directly with sqlc-generated code:
 
 ```go
-func (r *repo) UpdateStatus(ctx context.Context, id uuid.UUID, status enum.OrderStatus) error {
+func (r *OrderRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OrderStatus) error {
     return r.q.UpdateOrderStatus(ctx, id, status)  // enum auto-converts via Value()
 }
 ```
 
 ### Best Practices
 
-1. **Dedicated package**: Place all enums in `domain/enum/`, NOT in `entity/` or `valueobject/`
-2. **Group by domain**: Related enums share one file (e.g., `account.go` has `AccountStatus` + `AuthProvider`)
+1. **Co-located with Entity**: Place enums in `domain/{entity}_types.go`, same `domain` package as Entity
+2. **Group by entity**: Related enums share one `_types.go` file (e.g., `order_types.go` has `OrderStatus` + `PaymentMethod`)
 3. **`zzz_` prefix**: Always use `--output=zzz_enumer_<typeName>.go` so generated files sort to bottom
 4. **First value = zero/unknown**: Start with `Unspecified` or `Unknown` as `iota` value 0
 5. **Prefix convention**: Use type name as prefix (`OrderStatusPending`), trim with `-trimprefix`
@@ -278,24 +288,52 @@ func (r *repo) UpdateStatus(ctx context.Context, id uuid.UUID, status enum.Order
 
 ## Repository Interface
 
-Domain layer defines interface only. Implementation lives in Adapter layer.
+Domain layer defines interface only, **co-located at the bottom of the Entity file**. Implementation lives in Repository layer (`repository/postgres/`).
 Transaction management (`WithTx`) is a persistence detail — not in Domain layer. Handled by Application layer's TxManager.
 
 ```go
-// internal/domain/repository/order_repository.go
+// internal/domain/order.go
+package domain
+
+import (
+    "context"
+    "github.com/google/uuid"
+)
+
+// ==================== Entity ====================
+
+type Order struct {
+    ID          uuid.UUID
+    UserID      uuid.UUID
+    Status      OrderStatus
+    TotalAmount valueobject.Money
+    Version     int
+    CreatedAt   time.Time
+    UpdatedAt   time.Time
+    events      []DomainEvent
+}
+
+// ... Entity methods (Confirm, Cancel, etc.)
+
+// ==================== Repository Interface ====================
+
+// OrderRepository defines the persistence interface for orders.
+// Co-located with Entity for high cohesion (Go convention: interface near its domain).
 type OrderRepository interface {
     // Create writes DB-generated ID, CreatedAt back to Entity (pointer = allows mutation, Go convention)
-    Create(ctx context.Context, order *entity.Order) error
-    GetByID(ctx context.Context, id uuid.UUID) (*entity.Order, error)
+    Create(ctx context.Context, order *Order) error
+    GetByID(ctx context.Context, id uuid.UUID) (*Order, error)
     // Update increments version via optimistic lock SQL, writes new Version back to Entity
-    Update(ctx context.Context, order *entity.Order) error
+    Update(ctx context.Context, order *Order) error
     Delete(ctx context.Context, id uuid.UUID) error
 }
 ```
 
+**Why co-located**: If Repository Interfaces grow beyond 5+ interfaces in a single `repository.go`, they bloat. Placing each interface at the bottom of its Entity file keeps high cohesion and avoids a single file growing too large.
+
 ### Repository Implementation
 
-See [data-layer.md — Repository Implementation Pattern](data-layer.md#repository-implementation-pattern) for the canonical implementation with `sqlutil` helpers, complete import block, and `toEntity()` mapping.
+See [data-layer.md — Repository Implementation Pattern](data-layer.md#repository-implementation-pattern) for the canonical implementation with `sqlutil` helpers, complete import block, and `toDomain()` mapping.
 
 ### Pessimistic Locking (SELECT FOR UPDATE)
 

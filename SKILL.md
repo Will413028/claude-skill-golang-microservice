@@ -40,17 +40,27 @@ built on Clean Architecture + gRPC + PostgreSQL + RabbitMQ.
 ## Core Architecture Principle
 
 ```
-Dependency direction (inward only): Adapter → Application → Domain
+Dependency direction (inward only): outer layers → inner layers
 
-Domain Layer:      Entity, Value Object, Repository Interface, Domain Event (zero external deps)
-Application Layer: UseCase, DTO, Input/Output Port, TxManager interface
-Adapter Layer:     gRPC Handler, Repository Impl, gRPC Client, MQ Consumer/Publisher
-Infrastructure:    Config, Server, DI, TxManager impl
+internal/
+├── domain/           # Entity, Value Object, Repository Interface, Domain Event (zero external deps)
+├── service/          # Reusable business logic (cross-UseCase)
+├── usecase/          # Orchestration + DTO + transactions (consumer-defined local interfaces)
+├── repository/postgres/  # Repository Impl + gen/ (sqlc) + mapper.go
+├── client/           # External gRPC clients (by service name)
+├── grpc/             # gRPC Handler (server.go + handler + mapper)
+├── consumer/         # MQ Consumer (Async stage)
+├── config/           # Config struct + DI module
+└── app/              # Assembles all fx.Modules
 ```
 
 **Domain Layer is the stable core across all stages** — Entity, Value Object, and state machines
-never change due to infrastructure changes. UseCase interface signatures remain stable;
+never change due to infrastructure changes. UseCase orchestration signatures remain stable;
 only internal implementations evolve with each stage.
+
+**Go-style flat directories** — No `adapter/inbound/outbound/` or `application/port/input/output/`.
+Each package is named by its concern (`grpc/`, `repository/postgres/`, `client/`).
+UseCase uses consumer-defined local interfaces for its dependencies (Go idiom).
 
 ## Stage Evolution Overview
 
@@ -66,16 +76,16 @@ Every new project follows these four stages. Determine the current stage to deci
 ### MVP — Must Do
 
 1. **Architecture skeleton** → Read [references/architecture.md](references/architecture.md)
-   - Clean Architecture layering + directory structure + naming conventions
+   - Flat Go-style directory structure + naming conventions
    - Monorepo structure (shared `go.mod`; evaluate `go.work` when services > 5–8)
-   - **Uber Fx Module Wiring** (per-layer modules, `fx.Provide` + `fx.As` for interface binding)
+   - **Uber Fx DI** (`var Module = fx.Module(...)` per package, `fx.Annotate` + `fx.As` for interface binding, assembled in `app/app.go`)
    - **Proto / buf tooling** (`buf.yaml`, `buf.gen.yaml`, Proto design conventions, `buf lint` + `buf breaking`)
    - **Local dev environment** (Docker Compose: PG + Redis + RabbitMQ + init-db.sh + Makefile)
 
 2. **Domain design** → Read [references/domain-layer.md](references/domain-layer.md)
    - Entity state machine (whitelist transitions + inject `now time.Time`)
    - Value Object (immutable, smallest unit)
-   - Repository Interface (Domain layer defines interface only)
+   - Repository Interface (co-located at bottom of Entity file in `domain/{entity}.go`)
    - Domain Event collection (Entity collects events on state transitions)
 
 3. **Communication & errors** → Read [references/grpc-patterns.md](references/grpc-patterns.md)
@@ -85,7 +95,7 @@ Every new project follows these four stages. Determine the current stage to deci
    - **Authentication / Authorization** (JWT Interceptor, RBAC Permission Interceptor, user context propagation, cross-service auth forwarding)
    - API pagination (Offset / Cursor strategy selection) + Batch API (partial failure pattern)
    - **Proto Versioning Strategy** (package naming, backward-compatible evolution, `buf breaking`)
-   - DTO mapping (manual mapper functions, compile-time safe)
+   - DTO mapping (manual mapper functions in `mapper.go`, compile-time safe)
 
 4. **HTTP Gateway** → Read [references/http-gateway.md](references/http-gateway.md)
    - Router + Controller pattern (Gin-based)
@@ -203,7 +213,7 @@ Every new project follows these four stages. Determine the current stage to deci
 | Naming conventions | ✅ Must | — | — | — |
 | Error handling (DomainError + Interceptor) | ✅ Must | — | — | — |
 | Domain Layer (Entity + VO + Repo Interface) | ✅ Must | — | — | — |
-| Output Ports + DTO mapping | ✅ Must | — | — | — |
+| DTO mapping + consumer-defined interfaces | ✅ Must | — | — | — |
 | Context Deadline / Timeout Budget | ✅ Must | — | — | — |
 | Authentication / Authorization | ✅ Must | — | — | — |
 | gRPC Interceptor Chain | ✅ Must (base) | Add MQ Trace propagation | — | — |
@@ -248,14 +258,16 @@ These can wait beyond MVP without significant risk:
 
 ### New Service Checklist
 
-1. Create directory structure (per architecture.md)
-2. Define Proto (`api/proto/{service}/v1/`)
-3. Design Domain Layer (Entity + Value Object + Repository Interface)
-4. Implement Application Layer (UseCase + DTO + Output Port)
-5. Implement Adapter Layer (gRPC Handler + Repository Impl)
-6. Configure Infrastructure (Config + DI modules + Server)
-7. Write Schema + Queries (sqlc + Atlas)
-8. Write tests (unit + integration)
+1. Create directory structure (per architecture.md): `domain/`, `usecase/`, `service/`, `repository/postgres/`, `grpc/`, `client/`, `config/`, `app/`
+2. Define Proto (`proto/{service}/`)
+3. Design Domain Layer: Entity (`domain/{entity}.go`) + Enums (`domain/{entity}_types.go`) + Value Object (`domain/valueobject/`) + Repository Interface (bottom of Entity file)
+4. Implement Service Layer (`service/`) for reusable business logic
+5. Implement UseCase Layer (`usecase/`) with DTOs (`usecase/dto/`) and consumer-defined local interfaces
+6. Implement Repository (`repository/postgres/`) with mapper.go + di.go
+7. Implement gRPC Handler (`grpc/`) with mapper.go + di.go
+8. Configure DI: each package has `di.go` with `var Module = fx.Module(...)`, assembled in `app/app.go`
+9. Write Schema (`db/schema/`) + Queries (`db/queries/`) → `sqlc generate` → `repository/postgres/gen/`
+10. Write tests (unit + integration)
 
 ### Sync vs Async Saga
 
@@ -299,7 +311,7 @@ These can wait beyond MVP without significant risk:
 - **Mapping**: Manual mapper functions (compile-time safe). No reflection-based tools (copier).
 - **Collections**: `samber/lo` allowed in Application/Adapter layers only. Forbidden in Domain layer (zero external deps).
 - **Error handling**: Domain Error carries ErrorCode. Interceptor maps centrally. UseCase must NEVER manually map gRPC Status.
-- **Transactions**: TxManager interface in Application Port, impl in Infrastructure. Repository uses `GetDBTX(ctx, pool)` for dynamic connection.
+- **Transactions**: TxManager interface in UseCase (consumer-defined), impl in Infrastructure. Repository uses `GetDBTX(ctx, pool)` for dynamic connection.
 - **Domain Events**: `ClearEvents()` must be called ONLY after TX commit succeeds.
 - **Entity concurrency**: Entity is NOT goroutine-safe. Cross-goroutine access requires Repository reload + optimistic lock.
 - **Event versioning**: Every Domain Event carries `Version()`. Consumers must handle version-based progressive migration.

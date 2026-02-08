@@ -18,39 +18,68 @@
 
 ```
 services/xxx-service/
-├── cmd/main.go                         # Entry point
+├── cmd/
+│   └── server/
+│       └── main.go                     # Entry point (Main Injector)
 │
 ├── internal/
-│   ├── domain/                         # Domain Layer
-│   │   ├── entity/                     # Entity + state machine
-│   │   ├── enum/                       # Type-safe enums (enumer generated)
+│   ├── domain/                         # Domain Layer (core, zero external deps)
+│   │   ├── order.go                    # Entity + Repository Interface + rich methods
+│   │   ├── order_types.go              # Type-safe enums (enumer generated, co-located with Entity)
+│   │   ├── order_event.go              # Domain Events for this aggregate
 │   │   ├── valueobject/                # Value Object (immutable, with behavior logic)
-│   │   ├── repository/                 # Repository Interface (interface only)
-│   │   ├── event/                      # Domain Event definitions (with EventType() + Version())
-│   │   └── service/                    # Domain Service (cross-entity business logic, zero deps)
+│   │   ├── service/                    # Domain Service (cross-entity business logic, zero deps)
+│   │   └── errors.go                   # Domain error definitions
 │   │
-│   ├── application/
-│   │   ├── usecase/                    # Business logic orchestration
-│   │   ├── dto/{request,response}/     # Data Transfer Objects
-│   │   ├── port/
-│   │   │   ├── input/                  # Input Port (UseCase interfaces)
-│   │   │   └── output/                 # Output Port (external dependency interfaces, incl. TxManager)
-│   │   └── service/                    # Application Service (reusable cross-UseCase logic)
+│   ├── usecase/                        # Application Layer: business flow orchestration
+│   │   ├── create_order.go             # UseCase implementation
+│   │   ├── cancel_order.go
+│   │   ├── dto/                        # Data Transfer Objects
+│   │   │   ├── order_req.go
+│   │   │   └── order_res.go
+│   │   └── di.go                       # fx.Module (UseCase layer DI)
 │   │
-│   ├── adapter/
-│   │   ├── inbound/
-│   │   │   ├── grpc/                   # gRPC Handler + Mapper
-│   │   │   └── consumer/              # MQ Consumer (added in Async stage)
-│   │   └── outbound/
-│   │       ├── persistence/           # Repository implementation (sqlc)
-│   │       ├── external/              # External service clients (non-gRPC: REST APIs, SDKs)
-│   │       ├── grpcclient/            # gRPC Client implementation
-│   │       └── publisher/             # MQ Publisher (added in Async stage)
+│   ├── service/                        # Application Service: reusable cross-UseCase logic
+│   │   ├── address_service.go
+│   │   ├── points_service.go
+│   │   └── di.go                       # fx.Module (Service layer DI)
 │   │
-│   └── infrastructure/
-│       ├── config/config.go
-│       ├── server/grpc_server.go
-│       └── fx/                         # DI modules (Uber Fx)
+│   ├── repository/                     # Data access (Outbound Adapter)
+│   │   ├── postgres/                   # Explicit technology naming
+│   │   │   ├── gen/                    # 🤖 sqlc auto-generated (DO NOT EDIT)
+│   │   │   │   ├── models.go           # DB Models (maps to table schema)
+│   │   │   │   ├── query.sql.go        # DB Methods (auto-generated)
+│   │   │   │   └── db.go              # DBTX Interface
+│   │   │   ├── order.go                # Implements domain.OrderRepository
+│   │   │   ├── mapper.go              # gen.Model ↔ domain.Entity conversion
+│   │   │   └── di.go                   # fx.Module (Postgres Repository DI)
+│   │   └── di.go                       # fx.Module (Repository module entry)
+│   │
+│   ├── client/                         # External service clients (Outbound Adapter)
+│   │   ├── payment/
+│   │   │   ├── client.go               # Payment API client
+│   │   │   ├── dto.go                  # Request/Response types
+│   │   │   └── mapper.go              # domain ↔ client DTO conversion
+│   │   ├── inventory/
+│   │   │   └── client.go               # Inventory gRPC client
+│   │   └── di.go                       # fx.Module (Client layer DI)
+│   │
+│   ├── grpc/                           # gRPC interface (Inbound Adapter)
+│   │   ├── server.go                   # gRPC Server setup
+│   │   ├── handler.go                 # gRPC Handler (calls UseCase)
+│   │   ├── mapper.go                  # Protobuf ↔ DTO conversion
+│   │   └── di.go                       # fx.Module (gRPC layer DI)
+│   │
+│   ├── consumer/                       # MQ Consumer (Inbound Adapter, added in Async stage)
+│   │   ├── order_consumer.go
+│   │   └── di.go
+│   │
+│   ├── config/                         # Configuration
+│   │   ├── config.go
+│   │   └── di.go                       # fx.Module (Config DI)
+│   │
+│   └── app/                            # Application assembly
+│       └── app.go                      # fx.New() — assembles all modules
 │
 ├── db/                                 # Database-related (centralized)
 │   ├── schema/schema.sql               # DDL (single source of truth)
@@ -61,16 +90,26 @@ services/xxx-service/
 │   ├── sqlc.yaml                       # sqlc configuration
 │   └── atlas.hcl                       # Atlas configuration
 │
-├── sqlcgen/                            # sqlc auto-generated Go code
-├── configs/
 ├── tests/
+├── scripts/
+├── Makefile
 └── Dockerfile
 ```
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Enum location** | `domain/*_types.go` (co-located with Entity) | High cohesion — Enum, Entity, and Repository Interface in same package |
+| **Repository Interface** | Bottom of `domain/{entity}.go` | Go convention: define interface near the domain it serves; avoids separate `repository/` package bloat |
+| **sqlc output** | `repository/postgres/gen/` | Named `gen/` (not `dao/`) to clearly indicate auto-generated code |
+| **Flat directory** | No `adapter/inbound/outbound/` nesting | Go-style flat structure; name by technology (`grpc/`, `postgres/`, `client/`) not by direction |
+| **DI per-layer** | Each package has `di.go` with `fx.Module` | Modular, self-contained; `app.go` only assembles modules |
 
 > **Database Directory Convention**: All database-related files (`schema/`, `queries/`, `migrations/`, `sqlc.yaml`, `atlas.hcl`) are centralized in the `db/` directory to keep the service root clean. Run commands from within `db/`:
 >
 > ```bash
-> cd db && sqlc generate           # Generate Go code
+> cd db && sqlc generate           # Generate Go code to internal/repository/postgres/gen/
 > cd db && atlas migrate diff ...  # Generate migration
 > ```
 
@@ -79,48 +118,48 @@ services/xxx-service/
 Application 層採用 **Service + UseCase 分層架構**，分離可重用邏輯與業務流程編排：
 
 ```
-application/
+internal/
 ├── service/                    # Application Service（可重用邏輯）
-│   ├── account_service.go      # AccountService: 帳號相關操作
-│   ├── address_service.go      # AddressService: 地址 CRUD
-│   └── points_service.go       # PointsService: 積分操作
+│   ├── address_service.go
+│   ├── points_service.go
+│   └── di.go                  # fx.Module
 │
 ├── usecase/                    # UseCase（業務流程編排）
-│   ├── google_oauth.go         # GoogleOAuthUseCase: OAuth 登入流程
-│   ├── checkout.go             # CheckoutUseCase: 結帳流程
-│   └── certification.go        # CertificationUseCase: 認證審核流程
-│
-├── dto/{request,response}/     # Data Transfer Objects
-└── port/output/                # Output Port interfaces
+│   ├── checkout_usecase.go
+│   ├── certification_usecase.go
+│   ├── dto/                   # Data Transfer Objects
+│   │   ├── checkout_req.go
+│   │   └── checkout_res.go
+│   └── di.go                  # fx.Module
 ```
 
 | Layer | Location | Purpose | 方法數 |
 |-------|----------|---------|--------|
-| **Application Service** | `application/service/` | 可重用的基礎操作，被多個 UseCase 共用 | 多個相關方法 |
-| **UseCase** | `application/usecase/` | 業務流程編排，組合多個 Services | 1-3 個公開方法 |
-| **Domain Service** | `domain/service/` | 純業務邏輯，跨多個 Entity，零外部依賴 | 依需求 |
+| **Application Service** | `internal/service/` | 可重用的基礎操作，被多個 UseCase 共用 | 多個相關方法 |
+| **UseCase** | `internal/usecase/` | 業務流程編排，組合多個 Services | 1-3 個公開方法 |
+| **Domain Service** | `internal/domain/service/` | 純業務邏輯，跨多個 Entity，零外部依賴 | 依需求 |
 
 ### Application Service 設計
 
 Service 封裝**可重用的基礎操作**，每個 Service 對應一個 Aggregate：
 
 ```go
-// application/service/address_service.go
+// internal/service/address_service.go
 type AddressService interface {
-    Get(ctx context.Context, id uuid.UUID) (*response.Address, error)
-    List(ctx context.Context, accountID uuid.UUID) ([]*response.Address, error)
-    Create(ctx context.Context, req *request.CreateAddress) error
-    Update(ctx context.Context, req *request.UpdateAddress) error
+    Get(ctx context.Context, id uuid.UUID) (*dto.Address, error)
+    List(ctx context.Context, accountID uuid.UUID) ([]*dto.Address, error)
+    Create(ctx context.Context, req *dto.CreateAddressRequest) error
+    Update(ctx context.Context, req *dto.UpdateAddressRequest) error
     Delete(ctx context.Context, id uuid.UUID) error
     SetDefault(ctx context.Context, accountID, addressID uuid.UUID) error
 }
 
 type addressService struct {
-    addressRepo repository.AddressRepository
+    addressRepo domain.AddressRepository  // 依賴 domain 層的 Repository 介面
     logger      *zap.Logger
 }
 
-func NewAddressService(repo repository.AddressRepository, logger *zap.Logger) AddressService {
+func NewAddressService(repo domain.AddressRepository, logger *zap.Logger) AddressService {
     return &addressService{addressRepo: repo, logger: logger}
 }
 ```
@@ -130,27 +169,33 @@ func NewAddressService(repo repository.AddressRepository, logger *zap.Logger) Ad
 UseCase 負責**業務流程編排**，組合多個 Services 完成完整流程：
 
 ```go
-// application/usecase/checkout.go
-type CheckoutUseCase interface {
-    Execute(ctx context.Context, req *request.Checkout) (*response.CheckoutResult, error)
+// internal/usecase/checkout_usecase.go
+type CheckoutUseCase struct {
+    addressSvc  service.AddressService
+    pointsSvc   service.PointsService
+    orderClient orderClient               // local interface (Go consumer-defined)
+    txManager   txManager                  // local interface
+    logger      *zap.Logger
 }
 
-type checkoutUseCase struct {
-    addressSvc  service.AddressService   // 依賴 Service，不是 Repository
-    pointsSvc   service.PointsService
-    orderClient output.OrderClient       // 外部服務 via Output Port
-    txManager   output.TxManager
-    logger      *zap.Logger
+// local interfaces — 消費者定義介面 (Go idiom)
+// Only declare methods that this UseCase actually uses
+type orderClient interface {
+    Create(ctx context.Context, req *CreateOrderRequest) (*CreateOrderResponse, error)
+}
+
+type txManager interface {
+    WithTx(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
 func NewCheckoutUseCase(
     addressSvc service.AddressService,
     pointsSvc service.PointsService,
-    orderClient output.OrderClient,
-    txManager output.TxManager,
+    orderClient orderClient,
+    txManager txManager,
     logger *zap.Logger,
-) CheckoutUseCase {
-    return &checkoutUseCase{
+) *CheckoutUseCase {
+    return &CheckoutUseCase{
         addressSvc:  addressSvc,
         pointsSvc:   pointsSvc,
         orderClient: orderClient,
@@ -159,20 +204,20 @@ func NewCheckoutUseCase(
     }
 }
 
-func (u *checkoutUseCase) Execute(ctx context.Context, req *request.Checkout) (*response.CheckoutResult, error) {
-    addr, err := u.addressSvc.Get(ctx, req.AddressID)
+func (uc *CheckoutUseCase) Execute(ctx context.Context, req *dto.CheckoutRequest) (*dto.CheckoutResponse, error) {
+    addr, err := uc.addressSvc.Get(ctx, req.AddressID)
     if err != nil { return nil, err }
 
     if req.UsePoints > 0 {
-        if err := u.pointsSvc.Deduct(ctx, req.AccountID, req.UsePoints); err != nil {
+        if err := uc.pointsSvc.Deduct(ctx, req.AccountID, req.UsePoints); err != nil {
             return nil, err
         }
     }
 
-    order, err := u.orderClient.Create(ctx, &output.CreateOrderRequest{...})
+    order, err := uc.orderClient.Create(ctx, &CreateOrderRequest{...})
     if err != nil { return nil, err }
 
-    return &response.CheckoutResult{OrderID: order.ID}, nil
+    return &dto.CheckoutResponse{OrderID: order.ID}, nil
 }
 ```
 
@@ -186,40 +231,12 @@ func (u *checkoutUseCase) Execute(ctx context.Context, req *request.Checkout) (*
 | 涉及外部服務呼叫 | **UseCase** | `GoogleOAuthUseCase`（呼叫 Google API）|
 | 複雜的狀態機流程 | **UseCase** | `CertificationUseCase`（認證審核流程）|
 
-### Fx Module Wiring
-
-Uses per-package `di.go` pattern (see [Uber Fx Dependency Injection](#uber-fx-dependency-injection) for details):
-
-```go
-// application/service/di.go
-package service
-
-func Module() fx.Option {
-    return fx.Options(
-        fx.Provide(fx.Annotate(NewAddressService, fx.As(new(AddressService)))),
-        fx.Provide(fx.Annotate(NewPointsService, fx.As(new(PointsService)))),
-        fx.Provide(fx.Annotate(NewAccountService, fx.As(new(AccountService)))),
-    )
-}
-
-// application/usecase/checkoutuc/di.go
-package checkoutuc
-
-func Module() fx.Option {
-    return fx.Options(
-        fx.Provide(fx.Annotate(NewCheckoutUseCase, fx.As(new(input.CheckoutUseCase)))),
-    )
-}
-```
-
-`main.go` 直接組合所有 Module（見 [Complete main.go Example](#complete-maingo-example)），不使用 Root Module 變數。
-
 ### 簡單 Service 可省略 UseCase
 
 如果業務邏輯簡單（純 CRUD，無跨服務流程），gRPC Handler 可直接呼叫 Service：
 
 ```go
-// adapter/inbound/grpc/address_handler.go
+// internal/grpc/address_handler.go
 type AddressHandler struct {
     addressSvc service.AddressService  // 直接依賴 Service
 }
@@ -234,56 +251,29 @@ func (h *AddressHandler) ListAddresses(ctx context.Context, req *pb.ListAddresse
 
 ### DTO Organization Pattern
 
-DTOs are organized **by UseCase/feature**, with each file containing related request/response types.
+DTOs live inside `usecase/dto/`, organized **by feature**, with each file containing paired request + response types.
 
 ```
-application/dto/
-├── request/
-│   ├── profile.go           # UpdateProfileRequest
-│   ├── address.go           # AddAddressRequest, UpdateAddressRequest
-│   ├── certification.go     # CreateCertificationDraft, SubmitApplication, SaveProgress
-│   ├── review.go            # ReviewApplication
-│   ├── customer.go          # ListCustomers, UpdateCustomerStatus, GetCustomerList
-│   └── tag.go               # CreateTag, UpdateTag, ManageCustomerTag
-└── response/
-    ├── profile.go           # Profile
-    ├── address.go           # Address
-    ├── certification.go     # CertificationApplication
-    ├── review.go            # CertificationReview
-    ├── customer.go          # Customer
-    ├── tag.go               # Tag
-    └── pagination.go        # PaginatedResult[T] (shared generic)
+usecase/dto/
+├── merchant_req.go          # CreateMerchantRequest, UpdateProfileRequest
+├── merchant_res.go          # MerchantResponse, MerchantProfile
+├── certification_req.go     # CreateDraftRequest, SubmitApplicationRequest
+├── certification_res.go     # CertificationResponse
+├── crm_req.go               # ListCustomersRequest, UpdateCustomerStatusRequest
+├── crm_res.go               # CustomerResponse, TagResponse
+└── common.go                # PaginatedResult[T], shared types
 ```
 
 **Organization Rules**:
 
 | Principle | Guideline |
 |-----------|-----------|
-| One file per feature | Group related request/response types by the UseCase they serve |
-| Matching names | `request/address.go` pairs with `response/address.go` |
-| Shared generics | Place `PaginatedResult[T]` in `pagination.go` |
+| Paired req/res files | `merchant_req.go` pairs with `merchant_res.go` |
+| One pair per feature | Group related request/response types by the UseCase they serve |
+| Shared generics | Place `PaginatedResult[T]` in `common.go` |
 | No domain leakage | DTOs are flat data structures, never reference Domain entities directly |
 
-**Why by-UseCase (not by-Domain or single file)**:
-
-| Pattern | Pros | Cons |
-|---------|------|------|
-| Single file | Simple | Grows unwieldy (13+ types in one file) |
-| By domain | Moderate grouping | Unclear boundaries, mixes unrelated UseCases |
-| **By UseCase** | Clear boundaries, easy navigation, supports UseCase-per-file pattern | More files (manageable) |
-
-**File Naming Examples**:
-
-```
-# Request files named after the operation
-request/profile.go          → UpdateProfileRequest
-request/certification.go    → CreateCertificationDraft, SubmitApplication, SaveProgress
-request/points.go           → AddPointsRequest, DeductPointsRequest, UpdatePointsConfigRequest
-
-# Response files named after the returned data
-response/profile.go         → Profile, ProfileSummary
-response/points.go          → PointsBalance, PointsRecord, PointsRule
-```
+**File Naming Convention**: `{feature}_req.go` + `{feature}_res.go`
 
 ## Monorepo Structure
 
@@ -371,14 +361,28 @@ project-root/
 | Update | `Update`, `Update<Aspect>` | `error` |
 | Delete | `Delete` | `error` |
 
-### External Adapter Structure
+### External Client Structure
 
-If a service calls external APIs (REST, SDKs), it MUST have:
+If a service calls external APIs (REST, SDKs, gRPC), organize by technology/service:
 
 ```
-adapter/outbound/external/           # Implementation
-application/port/output/             # Interface definition
-infrastructure/fx/external_module.go # Fx wiring
+internal/client/                     # External service clients
+├── payment/
+│   ├── client.go                    # Implementation
+│   ├── dto.go                       # Request/Response types
+│   └── mapper.go                    # domain ↔ client DTO conversion
+├── inventory/
+│   └── client.go                    # gRPC client wrapper
+└── di.go                            # fx.Module
+```
+
+UseCase defines local interfaces for external dependencies (Go consumer-defined interface pattern):
+
+```go
+// internal/usecase/create_order.go
+type paymentClient interface {
+    Charge(ctx context.Context, req *ChargeRequest) (*ChargeResponse, error)
+}
 ```
 
 ## Monorepo Scaling Strategy `[Infrastructure]`
@@ -392,94 +396,121 @@ Initially all services share a single `go.mod`. When service count exceeds 5–8
 
 ## Uber Fx Dependency Injection
 
-Uber Fx wires all layers together. Each package contains its own `di.go` with a `Module()` function.
+Uber Fx wires all layers together. Each package contains its own `di.go` with a `var Module` (using `fx.Module` for named modules).
 
 ### Module Layout
 
 ```
 internal/
-├── application/
-│   └── usecase/
-│       ├── orderuc/
-│       │   ├── di.go              # func Module() fx.Option
-│       │   ├── create_order.go
-│       │   └── cancel_order.go
-│       └── paymentuc/
-│           ├── di.go
-│           └── process_payment.go
-├── adapter/
-│   ├── inbound/
-│   │   └── grpc/
-│   │       ├── di.go              # Handler module
-│   │       └── order_handler.go
-│   └── outbound/
-│       └── persistence/
-│           ├── di.go              # Repository module
-│           ├── order_repository.go
-│           └── payment_repository.go
-└── infrastructure/
-    └── fx/
-        ├── config_module.go       # ConfigModule
-        ├── logger_module.go       # LoggerModule
-        ├── database_module.go     # DatabaseModule + TxManager
-        ├── otel_module.go         # OTelModule (TracerProvider + lifecycle)
-        └── grpc_module.go         # GRPCModule + NewGRPCServer + Lifecycle
+├── usecase/
+│   ├── create_order.go
+│   ├── cancel_order.go
+│   └── di.go                     # var Module = fx.Module("usecase", ...)
+├── service/
+│   ├── address_service.go
+│   └── di.go                     # var Module = fx.Module("service", ...)
+├── repository/
+│   ├── postgres/
+│   │   ├── order.go
+│   │   └── di.go                 # var Module = fx.Module("repository.postgres", ...)
+│   └── di.go                     # var Module (aggregates sub-modules)
+├── client/
+│   ├── payment/client.go
+│   └── di.go                     # var Module = fx.Module("client", ...)
+├── grpc/
+│   ├── handler.go
+│   └── di.go                     # var Module = fx.Module("grpc", ...)
+├── config/
+│   ├── config.go
+│   └── di.go                     # var Module = fx.Module("config", ...)
+└── app/
+    └── app.go                    # Assembles all modules
 ```
 
 ### Package-Level `di.go`
 
-Each package exposes a `Module()` function. See [Complete di.go Examples](#complete-digo-examples) for full code with `fx.Annotate` + `fx.As` interface binding.
+Each package exposes a `var Module` using `fx.Module()` for named module grouping. This produces clean error messages from Fx when dependency resolution fails.
 
 **Convention**:
 
-- Constructor 用大寫 (`NewXxx`) — 方便測試直接呼叫，di.go 內用 `fx.Annotate` 包裝綁定 interface
+- Use `var Module = fx.Module(...)` (not `func Module()`) for cleaner import syntax
+- Constructor 用大寫 (`NewXxx`) — 方便測試直接呼叫
+- Repository `di.go` uses `fx.Annotate` + `fx.As` to bind concrete type to domain interface
+- UseCase `di.go` provides concrete types directly (gRPC handler depends on concrete UseCase)
 - 新增 UseCase 只改該 package 的 `di.go`，減少 merge conflicts
-- Package 自包含，易於維護
 
 ### Fx Key Rules
 
 | Concept | When to Use |
 |---------|-------------|
+| `fx.Module("name", ...)` | Named module grouping — gives clear error messages |
 | `fx.Provide` | Constructors that return types for others to depend on |
 | `fx.Invoke` | Side-effects (register handlers, start pollers) — runs at startup |
-| `fx.As(new(Interface))` | Bind concrete type to interface (dependency inversion at DI layer) |
+| `fx.As(new(Interface))` | Bind concrete type to interface (e.g., `*postgres.OrderRepository` → `domain.OrderRepository`) |
 | `fx.Annotate` + `fx.ParamTags` | Disambiguate multiple implementations of the same interface |
 | `fx.Lifecycle` | Register `OnStart` / `OnStop` hooks (server listen, graceful shutdown) |
 
-### Complete `main.go` Example
+### Complete `app.go` Example
 
 ```go
-// cmd/order-service/main.go
-package main
+// internal/app/app.go
+package app
 
 import (
+    "context"
     "go.uber.org/fx"
-    "go.uber.org/zap"
 
-    grpchandler "github.com/yourproject/order-service/internal/adapter/inbound/grpc"
-    "github.com/yourproject/order-service/internal/adapter/outbound/persistence"
-    "github.com/yourproject/order-service/internal/application/usecase/orderuc"
-    infrafx "github.com/yourproject/order-service/internal/infrastructure/fx"
+    "github.com/yourproject/order-service/internal/client"
+    "github.com/yourproject/order-service/internal/config"
+    "github.com/yourproject/order-service/internal/grpc"
+    "github.com/yourproject/order-service/internal/repository"
+    "github.com/yourproject/order-service/internal/service"
+    "github.com/yourproject/order-service/internal/usecase"
 )
 
+// New creates the application (very clean!)
+func New() *fx.App {
+    return fx.New(
+        // Layer 1: Configuration
+        config.Module,
+
+        // Layer 2: Data access + External clients
+        repository.Module,
+        client.Module,
+
+        // Layer 3: Business logic
+        service.Module,
+        usecase.Module,
+
+        // Layer 4: Interface (gRPC server)
+        grpc.Module,
+
+        // Start the application
+        fx.Invoke(run),
+    )
+}
+
+func run(lifecycle fx.Lifecycle, srv *grpc.Server) {
+    lifecycle.Append(fx.Hook{
+        OnStart: func(ctx context.Context) error {
+            go srv.Start()
+            return nil
+        },
+        OnStop: func(ctx context.Context) error {
+            return srv.Stop()
+        },
+    })
+}
+```
+
+```go
+// cmd/server/main.go
+package main
+
+import "github.com/yourproject/order-service/internal/app"
+
 func main() {
-    fx.New(
-        // Infrastructure (config, logger, OTel, database, gRPC server)
-        infrafx.ConfigModule,
-        infrafx.LoggerModule,
-        infrafx.OTelModule,       // after LoggerModule (needs *zap.Logger)
-        infrafx.DatabaseModule,
-        infrafx.GRPCModule,
-
-        // Adapter — Outbound (repository implementations)
-        persistence.Module(),
-
-        // Application — UseCase
-        orderuc.Module(),
-
-        // Adapter — Inbound (gRPC handlers)
-        grpchandler.Module(),
-    ).Run()
+    app.New().Run()
 }
 ```
 
@@ -487,163 +518,123 @@ func main() {
 
 ### Complete `di.go` Examples
 
-**UseCase — Interface binding with `fx.As`**:
+**UseCase — Provide concrete types directly**:
 
 ```go
-// internal/application/usecase/orderuc/di.go
-package orderuc
+// internal/usecase/di.go
+package usecase
 
-import (
-    "go.uber.org/fx"
-    "github.com/yourproject/order-service/internal/application/port/input"
+import "go.uber.org/fx"
+
+// Module UseCase 層的依賴注入模組
+var Module = fx.Module("usecase",
+    fx.Provide(
+        NewCreateOrderUseCase,
+        NewCancelOrderUseCase,
+        NewListOrdersUseCase,
+    ),
+    // Background workers use fx.Invoke
+    fx.Invoke(startSyncWorker),
 )
 
-func Module() fx.Option {
-    return fx.Options(
-        fx.Provide(fx.Annotate(NewCreateOrderUseCase, fx.As(new(input.CreateOrderUseCase)))),
-        fx.Provide(fx.Annotate(NewGetOrderUseCase, fx.As(new(input.GetOrderUseCase)))),
-        fx.Provide(fx.Annotate(NewListOrdersUseCase, fx.As(new(input.ListOrdersUseCase)))),
-        fx.Provide(fx.Annotate(NewCancelOrderUseCase, fx.As(new(input.CancelOrderUseCase)))),
-    )
+func startSyncWorker(uc *SyncUseCase) {
+    uc.StartWorker()
 }
 ```
 
-**Repository — Interface binding**:
+**Repository — Bind to domain interface with `fx.Annotate` + `fx.As`**:
 
 ```go
-// internal/adapter/outbound/persistence/di.go
-package persistence
+// internal/repository/postgres/di.go
+package postgres
+
+import (
+    "context"
+    "go.uber.org/fx"
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/yourproject/order-service/internal/config"
+    "github.com/yourproject/order-service/internal/domain"
+)
+
+// Module Postgres Repository 層
+var Module = fx.Module("repository.postgres",
+    // Database connection pool
+    fx.Provide(NewDBPool),
+
+    // Bind concrete repos to domain interfaces
+    fx.Provide(
+        fx.Annotate(NewOrderRepository, fx.As(new(domain.OrderRepository))),
+        fx.Annotate(NewPaymentRepository, fx.As(new(domain.PaymentRepository))),
+    ),
+)
+
+func NewDBPool(cfg *config.Config) (*pgxpool.Pool, error) {
+    return pgxpool.New(context.Background(), cfg.Database.DSN())
+}
+```
+
+```go
+// internal/repository/di.go
+package repository
 
 import (
     "go.uber.org/fx"
-    "github.com/yourproject/order-service/internal/domain/repository"
+    "github.com/yourproject/order-service/internal/repository/postgres"
 )
 
-func Module() fx.Option {
-    return fx.Options(
-        fx.Provide(fx.Annotate(NewOrderRepository, fx.As(new(repository.OrderRepository)))),
-    )
-}
+// Module Repository 總模組（聚合子模組）
+var Module = fx.Module("repository",
+    postgres.Module,
+    // redis.Module,  // 未來擴展
+)
 ```
 
 **gRPC Handler — Registration via `fx.Invoke`**:
 
 ```go
-// internal/adapter/inbound/grpc/di.go
+// internal/grpc/di.go
 package grpc
 
 import (
     "go.uber.org/fx"
-    pb "github.com/yourproject/go-proto/order/v1"
-    "google.golang.org/grpc"
+    pb "github.com/yourproject/go-pkg/proto/order/v1"
+    grpclib "google.golang.org/grpc"
 )
 
-func Module() fx.Option {
-    return fx.Options(
-        fx.Provide(NewOrderHandler),
-        fx.Invoke(func(server *grpc.Server, h *OrderHandler) {
-            pb.RegisterOrderServiceServer(server, h)
-        }),
-    )
-}
+var Module = fx.Module("grpc",
+    fx.Provide(NewHandler),
+    fx.Provide(NewServer),
+    fx.Invoke(func(server *grpclib.Server, h *Handler) {
+        pb.RegisterOrderServiceServer(server, h)
+    }),
+)
 ```
 
-**Infrastructure — Config + Logger + Database + Tracer + gRPC Server**:
+**Config — Simple provider**:
 
 ```go
-// internal/infrastructure/fx/config_module.go
-var ConfigModule = fx.Provide(config.Load)  // Fail-Fast: fx.New fails if config invalid
+// internal/config/di.go
+package config
 
-// internal/infrastructure/fx/logger_module.go
-var LoggerModule = fx.Provide(func(cfg *config.Config) (*zap.Logger, error) {
-    if cfg.Env == "production" {
-        return zap.NewProduction()
-    }
-    return zap.NewDevelopment()
-})
+import "go.uber.org/fx"
 
-// internal/infrastructure/fx/database_module.go
-var DatabaseModule = fx.Options(
-    fx.Provide(func(cfg *config.Config) (*pgxpool.Pool, error) {
-        return database.NewPool(context.Background(), cfg.Database.URL())
-    }),
-    fx.Provide(fx.Annotate(
-        database.NewTxManager,
-        fx.As(new(port.TxManager)),
-    )),
+var Module = fx.Module("config",
+    fx.Provide(Load),
 )
-
-// internal/infrastructure/fx/otel_module.go
-// Uses shared pkg/otel.InitTracer — env-var-driven, no Config struct needed.
-// fx.Invoke (not fx.Provide) because this is a side-effect (sets global TracerProvider).
-// Place after LoggerModule in main.go (depends on *zap.Logger).
-var OTelModule = fx.Invoke(func(lc fx.Lifecycle, logger *zap.Logger) {
-    shutdown := pkgotel.InitTracer("order-service", logger)  // ← change per service
-    lc.Append(fx.Hook{
-        OnStop: func(ctx context.Context) error {
-            logger.Info("Shutting down tracer provider")
-            return shutdown(ctx)
-        },
-    })
-})
-
-// internal/infrastructure/fx/grpc_module.go
-var GRPCModule = fx.Options(
-    fx.Provide(NewGRPCServer),
-    fx.Invoke(startGRPCServer),
-)
-
-func NewGRPCServer(
-    logger *zap.Logger,
-    metrics *prometheus.Registry,
-    auth *interceptor.AuthInterceptor,
-    rl *interceptor.RateLimiter,
-) *grpc.Server {
-    return grpc.NewServer(
-        interceptor.OTelServerStatsHandler(),  // StatsHandler — separate from interceptor chain
-        grpc.ChainUnaryInterceptor(
-            interceptor.ServerCorrelationInterceptor(),  // 1. correlation_id / request_id
-            interceptor.LoggingInterceptor(logger),      // 2. Request logging
-            interceptor.RecoveryInterceptor(logger),     // 3. Panic recovery
-            interceptor.MetricsInterceptor(metrics),     // 4. Prometheus metrics
-            interceptor.RateLimitInterceptor(rl),        // 5. Rate limiting
-            auth.Unary(),                                // 6. Authentication
-            interceptor.ErrorMappingInterceptor(),       // 7. Error mapping (innermost)
-        ),
-    )
-}
-
-func startGRPCServer(lc fx.Lifecycle, server *grpc.Server, cfg *config.Config, logger *zap.Logger) {
-    lc.Append(fx.Hook{
-        OnStart: func(ctx context.Context) error {
-            lis, err := net.Listen("tcp", ":"+cfg.Server.GRPCPort)
-            if err != nil { return err }
-            logger.Info("gRPC server listening", zap.String("port", cfg.Server.GRPCPort))
-            go server.Serve(lis)
-            return nil
-        },
-        OnStop: func(ctx context.Context) error {
-            logger.Info("gRPC server shutting down")
-            server.GracefulStop()
-            return nil
-        },
-    })
-}
 ```
 
 ### Dependency Graph
 
 ```
-main.go
-  └─ fx.New()
-       ├─ ConfigModule          → *config.Config
-       ├─ LoggerModule          → *zap.Logger
-       ├─ DatabaseModule        → *pgxpool.Pool, port.TxManager
-       ├─ OTelModule            → (fx.Invoke: sets global TracerProvider + shutdown hook)
-       ├─ GRPCModule            → *grpc.Server (+ Lifecycle hooks)
-       ├─ persistence.Module()  → repository.OrderRepository (impl)
-       ├─ orderuc.Module()      → input.CreateOrderUseCase, input.GetOrderUseCase, ...
-       └─ grpchandler.Module()  → *OrderHandler (+ fx.Invoke registers to grpc.Server)
+app.go → fx.New()
+  ├─ config.Module              → *config.Config
+  ├─ repository.Module
+  │   └─ postgres.Module        → *pgxpool.Pool, domain.OrderRepository (impl)
+  ├─ client.Module              → *PaymentClient, *InventoryClient
+  ├─ service.Module             → service.AddressService, service.PointsService
+  ├─ usecase.Module             → *CreateOrderUseCase, *CancelOrderUseCase
+  ├─ grpc.Module                → *Handler, *Server (+ fx.Invoke registers to grpc.Server)
+  └─ fx.Invoke(run)             → Lifecycle hooks (start/stop server)
 ```
 
 ### Common Mistake: Circular Dependencies

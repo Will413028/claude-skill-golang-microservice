@@ -44,7 +44,9 @@ services/xxx-service/
 │   ├── sqlc.yaml               # sqlc configuration
 │   └── atlas.hcl               # Atlas configuration
 │
-├── sqlcgen/                    # sqlc auto-generated Go code (service root for import convenience)
+├── internal/
+│   └── repository/postgres/
+│       └── gen/                # sqlc auto-generated Go code (DO NOT EDIT)
 ```
 
 > Run commands from within `db/`: `cd db && sqlc generate`, `cd db && atlas migrate diff ...`
@@ -180,8 +182,8 @@ sql:
     schema: "schema/schema.sql"
     gen:
       go:
-        package: "sqlcgen"
-        out: "../sqlcgen"           # Output to service root (../sqlcgen/ from db/)
+        package: "gen"
+        out: "../internal/repository/postgres/gen"  # Output to repository layer
         sql_package: "pgx/v5"
         emit_json_tags: true
         emit_result_struct_pointers: true
@@ -416,39 +418,36 @@ func JSONValue(data []byte) json.RawMessage {
 
 ### Repository Implementation Pattern
 
-Each repository directly inlines the `sqlcgen.New()` call with `database.GetDBTX()`:
+Each repository directly inlines the `gen.New()` call with `database.GetDBTX()`. Mapping logic lives in a separate `mapper.go` file.
 
 ```go
-// adapter/outbound/persistence/order_repository.go
-package persistence
+// internal/repository/postgres/order_repository.go
+package postgres
 
 import (
     "context"
     "errors"
-    "fmt"
+
     "github.com/google/uuid"
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
+
     "github.com/yourproject/go-pkg/database"
-    "github.com/yourproject/go-pkg/sqlutil"
     "github.com/yourproject/order-service/internal/domain"
-    "github.com/yourproject/order-service/internal/domain/entity"
-    "github.com/yourproject/order-service/internal/domain/repository"
-    "github.com/yourproject/order-service/internal/domain/valueobject"
-    "github.com/yourproject/order-service/sqlcgen"
+    "github.com/yourproject/order-service/internal/repository/postgres/gen"
 )
 
 type orderRepository struct {
     pool *pgxpool.Pool
 }
 
-func NewOrderRepository(pool *pgxpool.Pool) repository.OrderRepository {
+func NewOrderRepository(pool *pgxpool.Pool) domain.OrderRepository {
     return &orderRepository{pool: pool}
 }
 
-func (r *orderRepository) GetByID(ctx context.Context, id uuid.UUID) (*entity.Order, error) {
-    // Inline pattern: sqlcgen.New() + database.GetDBTX() for TX support
-    q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
+func (r *orderRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Order, error) {
+    // Inline pattern: gen.New() + database.GetDBTX() for TX support
+    q := gen.New(database.GetDBTX(ctx, r.pool))
     row, err := q.GetOrderByID(ctx, id)
     if err != nil {
         if errors.Is(err, pgx.ErrNoRows) {
@@ -456,37 +455,46 @@ func (r *orderRepository) GetByID(ctx context.Context, id uuid.UUID) (*entity.Or
         }
         return nil, err
     }
-    return r.toEntity(*row)
+    return toDomainOrder(*row)
 }
 
-func (r *orderRepository) Create(ctx context.Context, o *entity.Order) error {
-    q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
+func (r *orderRepository) Create(ctx context.Context, o *domain.Order) error {
+    q := gen.New(database.GetDBTX(ctx, r.pool))
     // NOT NULL columns → plain types; nullable columns → sqlutil helpers
-    // emit_result_struct_pointers: true → CreateOrder returns *sqlcgen.Order
-    row, err := q.CreateOrder(ctx, sqlcgen.CreateOrderParams{
-        UserID:   o.UserID,
-        Status:   o.Status.String(),
-        Amount:   o.TotalAmount.Amount,
-        Currency: o.TotalAmount.Currency,
-    })
+    // emit_result_struct_pointers: true → CreateOrder returns *gen.Order
+    row, err := q.CreateOrder(ctx, toCreateOrderParams(o))
     if err != nil {
         return err
     }
+    // Write DB-generated fields back to Entity
     o.ID = row.ID
     o.Version = int(row.Version)
     o.CreatedAt = row.CreatedAt
     o.UpdatedAt = row.UpdatedAt
     return nil
 }
+```
 
-// toEntity maps sqlc generated struct to domain entity.
-// Callers dereference the pointer from sqlc (*sqlcgen.Order → sqlcgen.Order).
-func (r *orderRepository) toEntity(row sqlcgen.Order) (*entity.Order, error) {
-    status, err := entity.OrderStatusString(row.Status)
+```go
+// internal/repository/postgres/mapper.go
+package postgres
+
+import (
+    "fmt"
+
+    "github.com/yourproject/go-pkg/sqlutil"
+    "github.com/yourproject/order-service/internal/domain"
+    "github.com/yourproject/order-service/internal/domain/valueobject"
+    "github.com/yourproject/order-service/internal/repository/postgres/gen"
+)
+
+// toDomainOrder maps gen.Order → domain.Order
+func toDomainOrder(row gen.Order) (*domain.Order, error) {
+    status, err := domain.OrderStatusString(sqlutil.TextValue(row.Status))
     if err != nil {
         return nil, fmt.Errorf("parse order status %q: %w", row.Status, err)
     }
-    return &entity.Order{
+    return &domain.Order{
         ID:     row.ID,
         UserID: row.UserID,
         Status: status,
@@ -499,13 +507,25 @@ func (r *orderRepository) toEntity(row sqlcgen.Order) (*entity.Order, error) {
         UpdatedAt: row.UpdatedAt,
     }, nil
 }
+
+// toCreateOrderParams maps domain.Order → gen.CreateOrderParams
+func toCreateOrderParams(o *domain.Order) gen.CreateOrderParams {
+    return gen.CreateOrderParams{
+        UserID:   o.UserID,
+        Status:   o.Status.String(),
+        Amount:   o.TotalAmount.Amount,
+        Currency: o.TotalAmount.Currency,
+    }
+}
 ```
 
 **Key Points:**
-- **No helpers.go**: Don't create a `getQueries()` helper function. Each service has its own `sqlcgen.Queries` type, so it can't be shared. Inline the call directly.
+- **Mapper in separate file**: `mapper.go` contains `toDomain*()` and `toCreateParams()` / `toUpdateParams()` functions. Keeps repository methods focused on DB operations.
+- **No helpers.go**: Don't create a `getQueries()` helper function. Each service has its own `gen.Queries` type, so it can't be shared. Inline the call directly.
 - **TX Support**: `database.GetDBTX(ctx, pool)` returns the transaction from context if available, otherwise the pool. This enables repositories to participate in transactions transparently. See [TxManager](async-patterns.md#txmanager-async) for the implementation that injects TX into context.
 - **Not Found Pattern**: Return `nil, domain.ErrXxxNotFound` for not found. Repository maps `pgx.ErrNoRows` to domain error; UseCase handles it directly via `errors.Is`.
 - **Type Conventions**: NOT NULL columns use plain types (`string`, `int64`) directly. Nullable columns use `sqlutil` helpers: `sqlutil.Text(s)` / `sqlutil.TextValue(t)` for `pgtype.Text`, etc.
+- **Return type is domain interface**: `NewOrderRepository` returns `domain.OrderRepository` (interface defined in `domain/order.go`).
 
 ## Keyset Pagination
 
@@ -570,8 +590,8 @@ LIMIT @page_size;
 ### Repository Implementation
 
 ```go
-func (r *orderRepository) ListByUserID(ctx context.Context, userID uuid.UUID, cursor *pagination.Cursor, pageSize int) ([]*entity.Order, error) {
-    q := sqlcgen.New(database.GetDBTX(ctx, r.pool))
+func (r *orderRepository) ListByUserID(ctx context.Context, userID uuid.UUID, cursor *pagination.Cursor, pageSize int) ([]*domain.Order, error) {
+    q := gen.New(database.GetDBTX(ctx, r.pool))
 
     hasCursor := cursor != nil
     var cursorTime time.Time
@@ -581,7 +601,7 @@ func (r *orderRepository) ListByUserID(ctx context.Context, userID uuid.UUID, cu
         cursorID = cursor.ID
     }
 
-    rows, err := q.ListOrdersByUser(ctx, sqlcgen.ListOrdersByUserParams{
+    rows, err := q.ListOrdersByUser(ctx, gen.ListOrdersByUserParams{
         UserID:     userID,
         HasCursor:  hasCursor,
         CursorTime: cursorTime,
@@ -592,9 +612,9 @@ func (r *orderRepository) ListByUserID(ctx context.Context, userID uuid.UUID, cu
         return nil, err
     }
 
-    orders := make([]*entity.Order, 0, len(rows))
+    orders := make([]*domain.Order, 0, len(rows))
     for _, row := range rows {
-        o, err := r.toEntity(*row)
+        o, err := toDomainOrder(*row)
         if err != nil { return nil, err }
         orders = append(orders, o)
     }
@@ -607,7 +627,7 @@ func (r *orderRepository) ListByUserID(ctx context.Context, userID uuid.UUID, cu
 Fetch `pageSize + 1` rows. If returned count > `pageSize`, there are more pages:
 
 ```go
-func (u *OrderUseCase) List(ctx context.Context, userID uuid.UUID, cursorToken string, pageSize int) ([]*entity.Order, string, error) {
+func (u *OrderUseCase) List(ctx context.Context, userID uuid.UUID, cursorToken string, pageSize int) ([]*domain.Order, string, error) {
     cursor, err := pagination.DecodeCursor(cursorToken)
     if err != nil {
         return nil, "", domain.ErrInvalidCursor
